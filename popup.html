@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Corretor PT-BR</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 310px;
+    background: #13131f;
+    color: #e2e8f0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 13px;
+    overflow: hidden;
+  }
+
+  .header {
+    background: linear-gradient(135deg, #1e1e2e, #16213e);
+    padding: 16px 18px 14px;
+    border-bottom: 1px solid #2d2d45;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .logo {
+    width: 36px; height: 36px;
+    background: linear-gradient(135deg, #3b82f6, #6366f1);
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 900; font-size: 13px; color: white; flex-shrink: 0;
+    box-shadow: 0 4px 12px rgba(99,102,241,0.4);
+  }
+  .header-text h1 { font-size: 14px; font-weight: 700; color: #f1f5f9; }
+  .header-text p  { font-size: 11px; color: #64748b; margin-top: 2px; line-height: 1.3; }
+
+  .screen { display: none; flex-direction: column; }
+  .screen.active { display: flex; }
+
+  .section { padding: 13px 18px; border-bottom: 1px solid #1e1e30; }
+  .section-title { font-size: 10px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px; }
+
+  .lang-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .lang-btn {
+    background: #1e1e2e; border: 1px solid #2d2d45; border-radius: 8px;
+    color: #94a3b8; font-size: 12px; font-weight: 500;
+    padding: 8px 10px; cursor: pointer; text-align: left;
+    display: flex; align-items: center; gap: 7px;
+    font-family: inherit; transition: all 0.15s;
+  }
+  .lang-btn:hover { background: #252538; border-color: #3d3d5c; color: #e2e8f0; }
+  .lang-btn.active { background: rgba(99,102,241,0.12); border-color: #6366f1; color: #a5b4fc; }
+  .lang-btn .flag { font-size: 16px; line-height: 1; }
+  .lang-btn .lang-info { display: flex; flex-direction: column; gap: 1px; }
+  .lang-btn .lang-code { font-size: 11px; font-weight: 700; }
+  .lang-btn .lang-name { font-size: 10px; color: #475569; }
+  .lang-btn.active .lang-name { color: #6366f1; }
+
+  .picky-row { display: flex; align-items: center; justify-content: space-between; padding: 2px 0; }
+  .picky-label { display: flex; flex-direction: column; gap: 2px; }
+  .picky-label span:first-child { font-size: 13px; color: #e2e8f0; }
+  .picky-label span:last-child  { font-size: 11px; color: #475569; }
+  .toggle { position: relative; width: 38px; height: 20px; flex-shrink: 0; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider { position: absolute; inset: 0; background: #2d2d45; border-radius: 20px; cursor: pointer; transition: background 0.2s; }
+  .toggle-slider::before { content: ''; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px; background: #64748b; border-radius: 50%; transition: transform 0.2s, background 0.2s; }
+  .toggle input:checked + .toggle-slider { background: rgba(99,102,241,0.3); }
+  .toggle input:checked + .toggle-slider::before { transform: translateX(18px); background: #6366f1; }
+
+  /* Botões de navegação (dicionário / integrações) */
+  .nav-btn {
+    width: 100%; padding: 10px 14px;
+    background: #1e1e2e; border: 1px solid #2d2d45; border-radius: 9px;
+    color: #94a3b8; font-size: 12px; font-weight: 600;
+    cursor: pointer; display: flex; align-items: center; gap: 8px;
+    font-family: inherit; transition: all 0.15s; text-align: left;
+    margin-bottom: 8px;
+  }
+  .nav-btn:last-child { margin-bottom: 0; }
+  .nav-btn:hover { background: #252538; border-color: #3d3d5c; color: #e2e8f0; }
+  .nav-btn .nav-icon { font-size: 15px; }
+  .nav-btn-right { margin-left: auto; font-size: 10px; color: #475569; }
+  .nav-btn-badge {
+    margin-left: auto;
+    font-size: 9px; font-weight: 700; padding: 2px 7px;
+    border-radius: 20px; background: rgba(34,197,94,0.15);
+    color: #4ade80; border: 1px solid rgba(34,197,94,0.25);
+  }
+
+  .footer { padding: 10px 18px; display: flex; align-items: center; justify-content: space-between; }
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 6px rgba(34,197,94,0.5); display: inline-block; margin-right: 6px; }
+  .status-text { font-size: 11px; color: #64748b; }
+  .version { font-size: 10px; color: #2d2d45; }
+
+  /* ── Cabeçalho de telas secundárias ── */
+  .sub-header {
+    padding: 14px 18px; border-bottom: 1px solid #2d2d45;
+    display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+  }
+  .back-btn { background: none; border: none; cursor: pointer; color: #64748b; font-size: 18px; line-height: 1; padding: 2px 6px 2px 0; border-radius: 6px; transition: color 0.15s; font-family: inherit; }
+  .back-btn:hover { color: #e2e8f0; }
+  .sub-header-title { font-size: 13px; font-weight: 700; color: #f1f5f9; }
+  .sub-header-right { margin-left: auto; font-size: 11px; color: #475569; }
+
+  /* ── Dicionário ── */
+  .dict-add-row { padding: 12px 18px; border-bottom: 1px solid #1e1e30; display: flex; gap: 8px; }
+  .dict-input { flex: 1; background: #1e1e2e; border: 1px solid #2d2d45; border-radius: 8px; color: #e2e8f0; font-size: 12px; padding: 7px 10px; font-family: inherit; outline: none; transition: border-color 0.15s; }
+  .dict-input:focus { border-color: #6366f1; }
+  .dict-input::placeholder { color: #475569; }
+  .dict-add-btn { background: linear-gradient(135deg, #3b82f6, #6366f1); border: none; border-radius: 8px; color: white; font-size: 12px; font-weight: 700; padding: 7px 12px; cursor: pointer; font-family: inherit; white-space: nowrap; transition: opacity 0.15s; }
+  .dict-add-btn:hover { opacity: 0.85; }
+  .dict-list { max-height: 230px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #2d2d45 transparent; }
+  .dict-list::-webkit-scrollbar { width: 4px; }
+  .dict-list::-webkit-scrollbar-thumb { background: #2d2d45; border-radius: 2px; }
+  .dict-empty { padding: 28px 18px; text-align: center; color: #475569; font-size: 12px; line-height: 1.6; }
+  .dict-empty-icon { font-size: 28px; margin-bottom: 8px; display: block; }
+  .dict-word-row { padding: 9px 18px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #1a1a2e; transition: background 0.12s; }
+  .dict-word-row:last-child { border-bottom: none; }
+  .dict-word-row:hover { background: rgba(255,255,255,0.03); }
+  .dict-word-text { flex: 1; font-size: 13px; color: #e2e8f0; font-weight: 500; word-break: break-all; }
+  .dict-word-remove { background: none; border: none; cursor: pointer; color: #475569; font-size: 16px; line-height: 1; padding: 2px 4px; border-radius: 4px; transition: color 0.15s, background 0.15s; flex-shrink: 0; }
+  .dict-word-remove:hover { color: #f87171; background: rgba(239,68,68,0.1); }
+
+  /* ── Integrações de IA ── */
+  .ai-list { padding: 10px 18px 4px; display: flex; flex-direction: column; gap: 8px; }
+
+  .ai-card {
+    background: #1a1a2c;
+    border: 1px solid #2d2d45;
+    border-radius: 11px;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+  .ai-card.configured { border-color: #22c55e40; }
+  .ai-card.active-ai  { border-color: #6366f1; }
+
+  .ai-card-header {
+    padding: 11px 14px;
+    display: flex; align-items: center; gap: 10px;
+    cursor: pointer; user-select: none;
+  }
+  .ai-logo { font-size: 20px; line-height: 1; flex-shrink: 0; }
+  .ai-info { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+  .ai-name { font-size: 13px; font-weight: 700; color: #f1f5f9; }
+  .ai-meta { display: flex; align-items: center; gap: 6px; }
+  .ai-price {
+    font-size: 9px; font-weight: 700; padding: 2px 7px;
+    border-radius: 20px; letter-spacing: 0.04em;
+  }
+  .ai-price.free { background: rgba(34,197,94,0.15); color: #4ade80; border: 1px solid rgba(34,197,94,0.25); }
+  .ai-price.paid { background: rgba(251,191,36,0.12); color: #fbbf24; border: 1px solid rgba(251,191,36,0.25); }
+  .ai-status-dot { width: 6px; height: 6px; border-radius: 50%; background: #2d2d45; flex-shrink: 0; }
+  .ai-status-dot.ok  { background: #22c55e; box-shadow: 0 0 5px rgba(34,197,94,0.5); }
+  .ai-status-dot.err { background: #ef4444; }
+
+  .ai-toggle-wrap { display: flex; align-items: center; gap: 8px; }
+  .ai-toggle { position: relative; width: 34px; height: 18px; flex-shrink: 0; }
+  .ai-toggle input { opacity: 0; width: 0; height: 0; }
+  .ai-toggle-slider { position: absolute; inset: 0; background: #2d2d45; border-radius: 18px; cursor: pointer; transition: background 0.2s; }
+  .ai-toggle-slider::before { content: ''; position: absolute; width: 12px; height: 12px; left: 3px; top: 3px; background: #64748b; border-radius: 50%; transition: transform 0.2s, background 0.2s; }
+  .ai-toggle input:checked + .ai-toggle-slider { background: rgba(99,102,241,0.35); }
+  .ai-toggle input:checked + .ai-toggle-slider::before { transform: translateX(16px); background: #6366f1; }
+
+  /* Painel expansível */
+  .ai-panel { display: none; padding: 0 14px 13px; border-top: 1px solid #1e1e30; }
+  .ai-panel.open { display: block; }
+
+  .ai-tutorial {
+    background: #13131f; border: 1px solid #2d2d45; border-radius: 8px;
+    padding: 10px 12px; margin: 10px 0 10px;
+    font-size: 11px; color: #64748b; line-height: 1.6;
+  }
+  .ai-tutorial a { color: #6366f1; text-decoration: none; }
+  .ai-tutorial a:hover { text-decoration: underline; }
+  .ai-tutorial ol { padding-left: 16px; margin-top: 4px; }
+  .ai-tutorial li { margin-bottom: 2px; }
+
+  .ai-key-row { display: flex; gap: 8px; margin-bottom: 8px; }
+  .ai-key-input {
+    flex: 1; background: #13131f; border: 1px solid #2d2d45; border-radius: 8px;
+    color: #e2e8f0; font-size: 11px; padding: 7px 10px; font-family: monospace;
+    outline: none; transition: border-color 0.15s;
+  }
+  .ai-key-input:focus { border-color: #6366f1; }
+  .ai-key-input::placeholder { color: #2d2d45; font-family: inherit; font-size: 11px; }
+
+  .ai-test-btn {
+    background: #1e1e2e; border: 1px solid #2d2d45; border-radius: 8px;
+    color: #94a3b8; font-size: 11px; font-weight: 600;
+    padding: 7px 12px; cursor: pointer; font-family: inherit;
+    white-space: nowrap; transition: all 0.15s; flex-shrink: 0;
+  }
+  .ai-test-btn:hover { background: #252538; color: #e2e8f0; }
+  .ai-test-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .ai-save-btn {
+    width: 100%; background: linear-gradient(135deg, #3b82f6, #6366f1);
+    border: none; border-radius: 8px; color: white;
+    font-size: 12px; font-weight: 700; padding: 8px;
+    cursor: pointer; font-family: inherit; transition: opacity 0.15s;
+  }
+  .ai-save-btn:hover { opacity: 0.85; }
+
+  .ai-feedback {
+    font-size: 11px; padding: 6px 10px; border-radius: 7px;
+    margin-bottom: 8px; line-height: 1.4; display: none;
+  }
+  .ai-feedback.ok  { background: rgba(34,197,94,0.1); color: #4ade80; border: 1px solid rgba(34,197,94,0.2); display: block; }
+  .ai-feedback.err { background: rgba(239,68,68,0.1); color: #f87171; border: 1px solid rgba(239,68,68,0.2); display: block; }
+
+  /* Toast */
+  .saved-msg {
+    position: fixed; bottom: 8px; left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: #1e1e2e; border: 1px solid #6366f1;
+    color: #a5b4fc; padding: 6px 14px;
+    border-radius: 20px; font-size: 11px; font-weight: 600;
+    opacity: 0; transition: all 0.2s; pointer-events: none;
+    white-space: nowrap; z-index: 999;
+  }
+  .saved-msg.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  .hist-clear-btn {
+    margin-left: auto; background: none; border: none;
+    cursor: pointer; font-size: 15px; padding: 2px 4px;
+    border-radius: 6px; transition: background 0.15s;
+  }
+  .hist-clear-btn:hover { background: rgba(239,68,68,0.15); }
+
+  .hist-list-popup {
+    overflow-y: auto; flex: 1;
+    scrollbar-width: thin; scrollbar-color: #2d2d45 transparent;
+  }
+  .hist-list-popup::-webkit-scrollbar { width: 4px; }
+  .hist-list-popup::-webkit-scrollbar-thumb { background: #2d2d45; border-radius: 2px; }
+
+  .hist-empty-popup {
+    padding: 32px 18px; text-align: center;
+    color: #475569; font-size: 12px; line-height: 1.6;
+  }
+  .hist-empty-popup .hist-empty-icon { font-size: 28px; margin-bottom: 8px; display: block; }
+
+  .hist-item-popup {
+    padding: 11px 18px; border-bottom: 1px solid #1a1a2e;
+    display: flex; flex-direction: column; gap: 5px;
+    transition: background 0.12s;
+  }
+  .hist-item-popup:hover { background: rgba(255,255,255,0.02); }
+  .hist-item-popup:last-child { border-bottom: none; }
+
+  .hist-item-meta {
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .hist-item-ai {
+    font-size: 9px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.06em; color: #6366f1;
+  }
+  .hist-item-date { font-size: 10px; color: #475569; }
+
+  .hist-item-original {
+    font-size: 11px; color: #475569; line-height: 1.4;
+    padding: 5px 8px; background: #0d0d1a; border-radius: 5px;
+  }
+  .hist-item-original::before { content: 'Antes: '; font-weight: 600; }
+
+  .hist-item-result {
+    font-size: 12px; color: #94a3b8; line-height: 1.5;
+  }
+  .hist-item-result::before { content: 'Depois: '; font-weight: 600; color: #a5b4fc; font-size: 11px; }
+
+  .hist-item-actions { display: flex; gap: 6px; margin-top: 2px; }
+  .hist-copy-btn {
+    background: none; border: 1px solid #2d2d45; border-radius: 6px;
+    color: #475569; font-size: 10px; font-weight: 600;
+    padding: 3px 9px; cursor: pointer; font-family: inherit;
+    transition: all 0.15s;
+  }
+  .hist-copy-btn:hover { color: #a5b4fc; border-color: #6366f1; }
+
+  .dict-actions-row {
+    display: flex; gap: 6px; padding: 8px 18px;
+    border-bottom: 1px solid #1e1e30;
+  }
+  .dict-action-btn {
+    flex: 1; background: #1e1e2e; border: 1px solid #2d2d45;
+    border-radius: 7px; color: #64748b; font-size: 11px;
+    font-weight: 600; padding: 6px; cursor: pointer;
+    font-family: inherit; transition: all 0.15s;
+  }
+  .dict-action-btn:hover { background: #252538; color: #e2e8f0; border-color: #3d3d5c; }
+
+  .silent-banner {
+    background: rgba(239,68,68,0.08);
+    border-bottom: 1px solid rgba(239,68,68,0.15);
+    padding: 8px 18px;
+    font-size: 11px; color: #f87171; font-weight: 600;
+    text-align: center; display: none;
+  }
+  .silent-banner.show { display: block; }
+
+  /* ── Dropdown idioma da UI ── */
+  .ui-lang-select-wrap {
+    position: relative;
+  }
+  .ui-lang-current {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    background: #1e1e2e;
+    border: 1px solid #3d3d5c;
+    border-radius: 9px;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    color: #a5b4fc;
+    transition: all 0.15s;
+    user-select: none;
+  }
+  .ui-lang-current:hover { background: #252538; border-color: #6366f1; color: #c7d2fe; }
+  .ui-lang-current.open  { border-color: #6366f1; color: #c7d2fe; background: rgba(99,102,241,0.12); }
+  .ui-lang-globe {
+    font-size: 15px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .ui-lang-arrow {
+    margin-left: auto;
+    font-size: 10px;
+    color: #6366f1;
+    transition: transform 0.2s;
+  }
+  .ui-lang-current.open .ui-lang-arrow { transform: rotate(180deg); }
+
+  .ui-lang-dropdown {
+    display: none;
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0; right: 0;
+    background: #1a1a2a;
+    border: 1px solid #2d2d45;
+    border-radius: 9px;
+    overflow: hidden;
+    z-index: 999;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    animation: corretor-card-in 0.15s ease both;
+  }
+  .ui-lang-dropdown.open { display: block; }
+
+  .ui-lang-opt {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    background: none;
+    border: none;
+    padding: 9px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    color: #94a3b8;
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: background 0.12s, color 0.12s;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .ui-lang-opt:last-child { border-bottom: none; }
+  .ui-lang-opt:hover { background: rgba(99,102,241,0.1); color: #e2e8f0; }
+  .ui-lang-opt.active { color: #a5b4fc; background: rgba(99,102,241,0.12); font-weight: 700; }
+</style>
+</head>
+<body>
+
+<!-- ══ Tela Principal ══ -->
+<div class="screen active" id="screenMain">
+  <div class="header">
+    <div class="logo">PT</div>
+    <div class="header-text">
+      <h1 data-i18n="appName">Corretor PT-BR</h1>
+      <p data-i18n="appDesc">Correção ortográfica e dicas de estilo em tempo real</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title" data-i18n="sectionLang">Idioma de verificação</div>
+    <div class="lang-grid" id="langGrid">
+      <button class="lang-btn" data-lang="pt-BR"><span class="flag">🇧🇷</span><div class="lang-info"><span class="lang-code">pt-BR</span><span class="lang-name">Português Brasil</span></div></button>
+      <button class="lang-btn" data-lang="pt-PT"><span class="flag">🇵🇹</span><div class="lang-info"><span class="lang-code">pt-PT</span><span class="lang-name">Português Portugal</span></div></button>
+      <button class="lang-btn" data-lang="en-US"><span class="flag">🇺🇸</span><div class="lang-info"><span class="lang-code">en-US</span><span class="lang-name">English (US)</span></div></button>
+      <button class="lang-btn" data-lang="en-GB"><span class="flag">🇬🇧</span><div class="lang-info"><span class="lang-code">en-GB</span><span class="lang-name">English (UK)</span></div></button>
+      <button class="lang-btn" data-lang="es"><span class="flag">🇪🇸</span><div class="lang-info"><span class="lang-code">es</span><span class="lang-name">Español</span></div></button>
+      <button class="lang-btn" data-lang="fr"><span class="flag">🇫🇷</span><div class="lang-info"><span class="lang-code">fr</span><span class="lang-name">Français</span></div></button>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title" data-i18n="sectionUiLang">Idioma da interface</div>
+    <div class="ui-lang-select-wrap">
+      <div class="ui-lang-current" id="uiLangCurrent" title="Change interface language">
+        <span class="ui-lang-globe">🌐</span>
+        <span id="uiLangFlag">🇺🇸</span>
+        <span id="uiLangLabel">English (US)</span>
+        <span class="ui-lang-arrow">▾</span>
+      </div>
+      <div class="ui-lang-dropdown" id="uiLangDropdown">
+        <button class="ui-lang-opt active" data-ui-lang="en-US">🇺🇸 English (US)</button>
+        <button class="ui-lang-opt" data-ui-lang="en-GB">🇬🇧 English (UK)</button>
+        <button class="ui-lang-opt" data-ui-lang="pt-BR">🇧🇷 Português (Brasil)</button>
+        <button class="ui-lang-opt" data-ui-lang="pt-PT">🇵🇹 Português (Portugal)</button>
+        <button class="ui-lang-opt" data-ui-lang="es">🇪🇸 Español</button>
+        <button class="ui-lang-opt" data-ui-lang="fr">🇫🇷 Français</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title" data-i18n="sectionMode">Modo de análise</div>
+    <div class="picky-row" style="margin-bottom:10px">
+      <div class="picky-label">
+        <span data-i18n="styleHints">💡 Dicas de estilo</span>
+        <span data-i18n="styleHintsDesc">Sugere melhorias além de erros</span>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="pickyToggle">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div class="picky-row">
+      <div class="picky-label">
+        <span data-i18n="silentMode">🔇 Modo silencioso</span>
+        <span data-i18n="silentModeDesc">Desativa tudo temporariamente</span>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="silentToggle">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div class="picky-row" style="margin-top:10px">
+      <div class="picky-label">
+        <span data-i18n="lightTheme">☀️ Tema claro</span>
+        <span data-i18n="lightThemeDesc">Alterna entre escuro e claro</span>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="themeToggle">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title" data-i18n="sectionTools">Ferramentas</div>
+    <button class="nav-btn" id="openDictBtn">
+      <span class="nav-icon">📖</span>
+      <span data-i18n="ignoredWords">Palavras ignoradas</span>
+      <span class="nav-btn-right" id="dictCount">0 palavras</span>
+    </button>
+    <button class="nav-btn" id="openAIBtn">
+      <span class="nav-icon">🤖</span>
+      <span data-i18n="aiIntegrations">Integrações de IA</span>
+      <span class="nav-btn-badge" id="aiActiveBadge" style="display:none">1 ativa</span>
+      <span class="nav-btn-right" id="aiInactiveLabel">nenhuma ativa</span>
+    </button>
+    <button class="nav-btn" id="openHistBtn">
+      <span class="nav-icon">🕐</span>
+      <span data-i18n="aiHistory">Histórico da IA</span>
+      <span class="nav-btn-right" id="histCount">0 itens</span>
+    </button>
+  </div>
+
+  <div class="footer">
+    <div><span class="status-dot"></span><span class="status-text" data-i18n="apiActive">API ativa (gratuita)</span></div>
+    <span class="version">v12 · by jrmaciel13</span>
+  </div>
+  <div class="silent-banner" id="silentBanner" data-i18n="silentBanner">🔇 Modo silencioso ativo — corretor desativado</div>
+</div>
+
+<!-- ══ Tela Dicionário ══ -->
+<div class="screen" id="screenDict">
+  <div class="sub-header">
+    <button class="back-btn" id="backFromDict">←</button>
+    <span class="sub-header-title" data-i18n="dictTitle">📖 Palavras ignoradas</span>
+    <span class="sub-header-right" id="dictHeaderCount">0</span>
+  </div>
+  <div class="dict-add-row">
+    <input class="dict-input" id="dictInput" type="text" data-i18n-placeholder="dictPlaceholder" placeholder="Adicionar palavra...">
+    <button class="dict-add-btn" id="dictAddBtn" data-i18n="dictAdd">+ Adicionar</button>
+  </div>
+  <div class="dict-actions-row">
+    <button class="dict-action-btn" id="exportDictBtn" data-i18n="dictExport">⬇ Exportar</button>
+    <button class="dict-action-btn" id="importDictBtn" data-i18n="dictImport">⬆ Importar</button>
+    <input type="file" id="importDictFile" accept=".json,.txt" style="display:none">
+  </div>
+  <div class="dict-list" id="dictList"></div>
+</div>
+
+<!-- ══ Tela Integrações ══ -->
+<div class="screen" id="screenAI">
+  <div class="sub-header">
+    <button class="back-btn" id="backFromAI">←</button>
+    <span class="sub-header-title" data-i18n="aiTitle">🤖 Integrações de IA</span>
+  </div>
+
+  <div class="ai-list">
+
+    <!-- Gemini -->
+    <div class="ai-card" id="card-gemini">
+      <div class="ai-card-header" data-ai="gemini">
+        <span class="ai-logo">✨</span>
+        <div class="ai-info">
+          <span class="ai-name">Gemini</span>
+          <div class="ai-meta">
+            <span class="ai-price free">GRATUITO</span>
+            <span class="ai-status-dot" id="dot-gemini"></span>
+          </div>
+        </div>
+        <div class="ai-toggle-wrap">
+          <label class="ai-toggle" onclick="event.stopPropagation()">
+            <input type="checkbox" id="toggle-gemini" data-ai="gemini">
+            <span class="ai-toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+      <div class="ai-panel" id="panel-gemini">
+        <div class="ai-tutorial">
+          <strong>Como obter sua chave gratuita:</strong>
+          <ol>
+            <li>Acesse <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a></li>
+            <li>Clique em <strong>"Create API Key"</strong></li>
+            <li>Copie e cole abaixo</li>
+          </ol>
+        </div>
+        <div class="ai-key-row">
+          <input class="ai-key-input" id="key-gemini" type="password" placeholder="AIza...">
+          <button class="ai-test-btn" id="test-gemini">Testar</button>
+        </div>
+        <div class="ai-feedback" id="fb-gemini"></div>
+        <button class="ai-save-btn" id="save-gemini">Salvar chave</button>
+      </div>
+    </div>
+
+    <!-- Groq -->
+    <div class="ai-card" id="card-groq">
+      <div class="ai-card-header" data-ai="groq">
+        <span class="ai-logo">⚡</span>
+        <div class="ai-info">
+          <span class="ai-name">Groq</span>
+          <div class="ai-meta">
+            <span class="ai-price free">GRATUITO</span>
+            <span class="ai-status-dot" id="dot-groq"></span>
+          </div>
+        </div>
+        <div class="ai-toggle-wrap">
+          <label class="ai-toggle" onclick="event.stopPropagation()">
+            <input type="checkbox" id="toggle-groq" data-ai="groq">
+            <span class="ai-toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+      <div class="ai-panel" id="panel-groq">
+        <div class="ai-tutorial">
+          <strong>Como obter sua chave gratuita:</strong>
+          <ol>
+            <li>Acesse <a href="https://console.groq.com/keys" target="_blank">console.groq.com/keys</a></li>
+            <li>Crie uma conta gratuita</li>
+            <li>Clique em <strong>"Create API Key"</strong></li>
+            <li>Copie e cole abaixo</li>
+          </ol>
+          <span style="font-size:10px;color:#475569">Usa LLaMA — muito rápido e 100% gratuito</span>
+        </div>
+        <div class="ai-key-row">
+          <input class="ai-key-input" id="key-groq" type="password" placeholder="gsk_...">
+          <button class="ai-test-btn" id="test-groq">Testar</button>
+        </div>
+        <div class="ai-feedback" id="fb-groq"></div>
+        <button class="ai-save-btn" id="save-groq">Salvar chave</button>
+      </div>
+    </div>
+
+    <!-- DeepSeek -->
+    <div class="ai-card" id="card-deepseek">
+      <div class="ai-card-header" data-ai="deepseek">
+        <span class="ai-logo">🌊</span>
+        <div class="ai-info">
+          <span class="ai-name">DeepSeek</span>
+          <div class="ai-meta">
+            <span class="ai-price paid">PAGO</span>
+            <span class="ai-status-dot" id="dot-deepseek"></span>
+          </div>
+        </div>
+        <div class="ai-toggle-wrap">
+          <label class="ai-toggle" onclick="event.stopPropagation()">
+            <input type="checkbox" id="toggle-deepseek" data-ai="deepseek">
+            <span class="ai-toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+      <div class="ai-panel" id="panel-deepseek">
+        <div class="ai-tutorial">
+          <strong>Como obter sua chave (quase gratuito):</strong>
+          <ol>
+            <li>Acesse <a href="https://platform.deepseek.com/api_keys" target="_blank">platform.deepseek.com</a></li>
+            <li>Crie uma conta e adicione crédito mínimo (~$0,50)</li>
+            <li>Gere uma API Key e cole abaixo</li>
+          </ol>
+          <span style="font-size:10px;color:#475569">Crédito mínimo necessário para uso</span>
+        </div>
+        <div class="ai-key-row">
+          <input class="ai-key-input" id="key-deepseek" type="password" placeholder="sk-...">
+          <button class="ai-test-btn" id="test-deepseek">Testar</button>
+        </div>
+        <div class="ai-feedback" id="fb-deepseek"></div>
+        <button class="ai-save-btn" id="save-deepseek">Salvar chave</button>
+      </div>
+    </div>
+
+    <!-- ChatGPT -->
+    <div class="ai-card" id="card-openai">
+      <div class="ai-card-header" data-ai="openai">
+        <span class="ai-logo">🟢</span>
+        <div class="ai-info">
+          <span class="ai-name">ChatGPT (OpenAI)</span>
+          <div class="ai-meta">
+            <span class="ai-price paid">PAGO</span>
+            <span class="ai-status-dot" id="dot-openai"></span>
+          </div>
+        </div>
+        <div class="ai-toggle-wrap">
+          <label class="ai-toggle" onclick="event.stopPropagation()">
+            <input type="checkbox" id="toggle-openai" data-ai="openai">
+            <span class="ai-toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+      <div class="ai-panel" id="panel-openai">
+        <div class="ai-tutorial">
+          <strong>Como obter sua chave:</strong>
+          <ol>
+            <li>Acesse <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com/api-keys</a></li>
+            <li>Clique em <strong>"Create new secret key"</strong></li>
+            <li>Copie e cole abaixo</li>
+          </ol>
+        </div>
+        <div class="ai-key-row">
+          <input class="ai-key-input" id="key-openai" type="password" placeholder="sk-...">
+          <button class="ai-test-btn" id="test-openai">Testar</button>
+        </div>
+        <div class="ai-feedback" id="fb-openai"></div>
+        <button class="ai-save-btn" id="save-openai">Salvar chave</button>
+      </div>
+    </div>
+
+    <!-- Claude -->
+    <div class="ai-card" id="card-claude">
+      <div class="ai-card-header" data-ai="claude">
+        <span class="ai-logo">🔶</span>
+        <div class="ai-info">
+          <span class="ai-name">Claude (Anthropic)</span>
+          <div class="ai-meta">
+            <span class="ai-price paid">PAGO</span>
+            <span class="ai-status-dot" id="dot-claude"></span>
+          </div>
+        </div>
+        <div class="ai-toggle-wrap">
+          <label class="ai-toggle" onclick="event.stopPropagation()">
+            <input type="checkbox" id="toggle-claude" data-ai="claude">
+            <span class="ai-toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+      <div class="ai-panel" id="panel-claude">
+        <div class="ai-tutorial">
+          <strong>Como obter sua chave:</strong>
+          <ol>
+            <li>Acesse <a href="https://console.anthropic.com/settings/keys" target="_blank">console.anthropic.com</a></li>
+            <li>Clique em <strong>"Create Key"</strong></li>
+            <li>Copie e cole abaixo</li>
+          </ol>
+        </div>
+        <div class="ai-key-row">
+          <input class="ai-key-input" id="key-claude" type="password" placeholder="sk-ant-...">
+          <button class="ai-test-btn" id="test-claude">Testar</button>
+        </div>
+        <div class="ai-feedback" id="fb-claude"></div>
+        <button class="ai-save-btn" id="save-claude">Salvar chave</button>
+      </div>
+    </div>
+
+  </div>
+  <div style="padding:10px 18px 14px; font-size:10px; color:#2d2d45; text-align:center; line-height:1.5">
+    Suas chaves ficam salvas localmente no Chrome.<br>Nunca são enviadas para terceiros.
+  </div>
+</div>
+
+<!-- ══ Tela Histórico ══ -->
+<div class="screen" id="screenHist">
+  <div class="sub-header">
+    <button class="back-btn" id="backFromHist">←</button>
+    <span class="sub-header-title" data-i18n="histTitle">🕐 Histórico da IA</span>
+    <button class="hist-clear-btn" id="clearHistBtn" data-i18n-title="histClearTitle" title="Limpar tudo">🗑</button>
+  </div>
+  <div class="hist-list-popup" id="histListPopup"></div>
+</div>
+
+<div class="saved-msg" id="savedMsg"></div>
+<script src="i18n.js"></script>
+<script src="popup.js"></script>
+</body>
+</html>
