@@ -365,6 +365,48 @@
   .ui-lang-opt:last-child { border-bottom: none; }
   .ui-lang-opt:hover { background: rgba(99,102,241,0.1); color: #e2e8f0; }
   .ui-lang-opt.active { color: #a5b4fc; background: rgba(99,102,241,0.12); font-weight: 700; }
+
+  /* ── Tema Claro ── */
+  body.theme-light {
+    background: #f8fafc;
+    color: #1e293b;
+  }
+  body.theme-light .header { background: linear-gradient(135deg, #e0e7ff, #dbeafe); border-bottom-color: #c7d2fe; }
+  body.theme-light .header-text h1 { color: #1e293b; }
+  body.theme-light .header-text p  { color: #64748b; }
+  body.theme-light .section        { border-bottom-color: #e2e8f0; }
+  body.theme-light .section-title  { color: #94a3b8; }
+  body.theme-light .lang-btn       { background: #f1f5f9; border-color: #e2e8f0; color: #475569; }
+  body.theme-light .lang-btn:hover { background: #e2e8f0; border-color: #c7d2fe; color: #1e293b; }
+  body.theme-light .lang-btn.active { background: rgba(99,102,241,0.08); border-color: #6366f1; color: #4f46e5; }
+  body.theme-light .picky-label span:first-child { color: #1e293b; }
+  body.theme-light .picky-label span:last-child  { color: #94a3b8; }
+  body.theme-light .toggle-slider  { background: #cbd5e1; }
+  body.theme-light .toggle-slider::before { background: #94a3b8; }
+  body.theme-light .nav-btn        { background: #f1f5f9; border-color: #e2e8f0; color: #475569; }
+  body.theme-light .nav-btn:hover  { background: #e2e8f0; border-color: #c7d2fe; color: #1e293b; }
+  body.theme-light .footer         { background: #f8fafc; }
+  body.theme-light .status-text    { color: #94a3b8; }
+  body.theme-light .version        { color: #cbd5e1; }
+  body.theme-light .ui-lang-current { background: #f1f5f9; border-color: #c7d2fe; color: #4f46e5; }
+  body.theme-light .ui-lang-dropdown { background: #ffffff; border-color: #e2e8f0; }
+  body.theme-light .ui-lang-opt    { color: #475569; border-bottom-color: rgba(0,0,0,0.06); }
+  body.theme-light .ui-lang-opt:hover { background: rgba(99,102,241,0.06); color: #1e293b; }
+  body.theme-light .saved-msg      { background: #ffffff; border-color: #6366f1; color: #4f46e5; }
+  body.theme-light .sub-header     { border-bottom-color: #e2e8f0; }
+  body.theme-light .sub-header-title { color: #1e293b; }
+  body.theme-light .dict-input     { background: #f1f5f9; border-color: #e2e8f0; color: #1e293b; }
+  body.theme-light .dict-word-row  { border-bottom-color: #f1f5f9; }
+  body.theme-light .dict-word-text { color: #1e293b; }
+  body.theme-light .ai-card        { background: #f8fafc; border-color: #e2e8f0; }
+  body.theme-light .ai-name        { color: #1e293b; }
+  body.theme-light .ai-key-input   { background: #f1f5f9; border-color: #e2e8f0; color: #1e293b; }
+  body.theme-light .ai-test-btn    { background: #f1f5f9; border-color: #e2e8f0; color: #64748b; }
+  body.theme-light .ai-panel       { border-top-color: #e2e8f0; }
+  body.theme-light .ai-tutorial    { background: #f1f5f9; border-color: #e2e8f0; color: #475569; }
+  body.theme-light .hist-item-popup { border-bottom-color: #f1f5f9; }
+  body.theme-light .hist-item-original { background: #f1f5f9; }
+  body.theme-light .dict-action-btn { background: #f1f5f9; border-color: #e2e8f0; color: #64748b; }
 </style>
 </head>
 <body>
@@ -467,9 +509,12 @@
 
   <div class="footer">
     <div><span class="status-dot"></span><span class="status-text" data-i18n="apiActive">API ativa (gratuita)</span></div>
-    <span class="version">v12 · by jrmaciel13</span>
+    <a class="version" href="https://github.com/jrmaciel131" target="_blank" style="color:#2d2d45;text-decoration:none;" title="GitHub: jrmaciel131">v12 · by jrmaciel131 ↗</a>
   </div>
   <div class="silent-banner" id="silentBanner" data-i18n="silentBanner">🔇 Modo silencioso ativo — corretor desativado</div>
+  <div style="padding:8px 18px 10px;font-size:9px;color:#2d2d45;text-align:center;line-height:1.5;border-top:1px solid #1e1e30">
+    Verificação ortográfica por <a href="https://languagetool.org" target="_blank" style="color:#475569;text-decoration:none">LanguageTool</a> — API pública gratuita
+  </div>
 </div>
 
 <!-- ══ Tela Dicionário ══ -->

@@ -146,37 +146,26 @@
 
   function setContentEditableText(el, text) {
     el.focus();
-    // FIX #8: Preserva formatação com quebras de linha convertendo \n para <br>
-    // Usa innerHTML para manter a estrutura do texto
-    const lines = text.split('\n');
-    if (lines.length > 1) {
-      // Tenta preservar quebras de linha via execCommand linha a linha
+    // Estratégia 1: innerText — preserva \n nativamente na maioria dos sites
+    // É o método mais confiável para manter quebras de linha
+    const prev = el.innerText || el.textContent || '';
+    if (prev.trim() === text.trim()) return; // nada a fazer
+
+    // Tenta via execCommand (compatível com React/Vue que escutam eventos de input)
+    try {
       const range = document.createRange();
       range.selectNodeContents(el);
       const sel = window.getSelection();
-      sel.removeAllRanges(); sel.addRange(range);
-      document.execCommand('delete', false, null);
-      for (let i = 0; i < lines.length; i++) {
-        document.execCommand('insertText', false, lines[i]);
-        if (i < lines.length - 1) document.execCommand('insertParagraph', false, null);
-      }
-      const current = getTextFrom(el).trim();
-      if (current !== text.trim()) {
-        // fallback: innerText preserva \n nativamente
-        el.innerText = text;
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-      }
-    } else {
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      const sel = window.getSelection();
-      sel.removeAllRanges(); sel.addRange(range);
+      sel.removeAllRanges();
+      sel.addRange(range);
       const ok = document.execCommand('insertText', false, text);
-      if (!ok || getTextFrom(el).trim() !== text.trim()) {
-        el.innerText = text;
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-      }
-    }
+      if (ok && (el.innerText || el.textContent || '').trim() === text.trim()) return;
+    } catch (e) { /* fallback abaixo */ }
+
+    // Fallback: innerText preserva \n → <br> nativamente
+    el.innerText = text;
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
   function triggerReactInput(el, text) {
@@ -1100,7 +1089,18 @@
       clearUnderlay(el);
       debouncedAnalyze();
     });
-    el.addEventListener('paste', () => setTimeout(debouncedAnalyze, 150));
+    el.addEventListener('paste', () => {
+      // Marca que houve interação (paste = usuário colou) e dispara análise
+      state._hasUserTyped = true;
+      indicator._hasUserTyped = true;
+      setTimeout(() => {
+        if (!SETTINGS.silentMode && isInViewport(el)) {
+          indicator.style.display = 'flex';
+          placeIndicator(indicator, el);
+        }
+        debouncedAnalyze();
+      }, 150);
+    });
 
     el.addEventListener('focus', () => {
       const text = getTextFrom(el).trim();

@@ -159,4 +159,17 @@ Une extension Chrome qui ajoute la correction orthographique et stylistique à *
 
 ---
 
-*PT-BR Spell Checker · by jrmaciel13 · v12*
+---
+
+## ⚠️ Powered by LanguageTool
+
+This extension uses the [LanguageTool](https://languagetool.org) public API for spell and grammar checking.
+
+- The free public API has usage limits (20 requests/IP/minute) and no uptime guarantees.
+- Limits and behavior may change at any time without notice.
+- For high-volume or commercial use, consider hosting [your own LanguageTool instance](https://dev.languagetool.org/http-server) or purchasing an [Enterprise plan](https://languagetool.org/enterprise).
+- Automated/bulk requests are not permitted under the public API terms.
+
+---
+
+*PT-BR Spell Checker · by [jrmaciel13](https://github.com/jrmaciel131) · v12*

@@ -36,6 +36,11 @@ function updateSilentBanner(active) {
   if (banner) banner.classList.toggle('show', active);
 }
 
+/* ── Tema do popup ── */
+function applyPopupTheme(isLight) {
+  document.body.classList.toggle('theme-light', isLight);
+}
+
 /* ── Toast ── */
 function showSaved(msg) {
   const el = document.getElementById('savedMsg');
@@ -200,7 +205,9 @@ load({ language: 'pt-BR', picky: true, ignoredWords: [], aiSettings: {}, silentM
   document.querySelectorAll('.lang-btn').forEach(b => b.classList.toggle('active', b.dataset.lang === s.language));
   document.getElementById('pickyToggle').checked  = s.picky;
   document.getElementById('silentToggle').checked = !!s.silentMode;
-  document.getElementById('themeToggle').checked  = s.theme === 'light';
+  const isLight = s.theme === 'light';
+  document.getElementById('themeToggle').checked  = isLight;
+  applyPopupTheme(isLight);
   updateSilentBanner(!!s.silentMode);
   updateDictCounters(s.ignoredWords || []);
   chrome.storage.local.get({ aiHistory: [] }, h => {
@@ -231,9 +238,11 @@ document.getElementById('silentToggle').addEventListener('change', e => {
 });
 
 document.getElementById('themeToggle').addEventListener('change', e => {
-  const theme = e.target.checked ? 'light' : 'dark';
+  const isLight = e.target.checked;
+  const theme = isLight ? 'light' : 'dark';
   const t = getT(currentUiLang);
-  save({ theme }, () => showSaved(theme === 'light' ? t.themeLight : t.themeDark));
+  applyPopupTheme(isLight);
+  save({ theme }, () => showSaved(isLight ? t.themeLight : t.themeDark));
 });
 
 /* ── Navegação ── */
