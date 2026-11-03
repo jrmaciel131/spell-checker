@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Corretor PT-BR — página de teste</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px; color: #1e293b; }
+  h2 { font-size: 15px; margin: 28px 0 6px; }
+  p.note { font-size: 12px; color: #64748b; margin: 0 0 8px; }
+  textarea, input, .ce { width: 100%; box-sizing: border-box; font: 15px/1.5 system-ui, sans-serif; padding: 8px; border: 1px solid #cbd5e1; border-radius: 8px; }
+  .ce { min-height: 60px; }
+  .scroll-self { height: 90px; overflow-y: auto; }
+  .scroll-parent { height: 110px; overflow-y: auto; border: 2px dashed #94a3b8; border-radius: 8px; padding: 6px; }
+  .modal { display: none; margin-top: 8px; padding: 12px; background: #f1f5f9; border-radius: 8px; }
+  .modal.open { display: block; }
+</style>
+</head>
+<body>
+<h1>Página de teste do Corretor PT-BR</h1>
+<p class="note">Cada bloco cobre um caso que já deu problema. Para testar com a extensão instalada, abra este arquivo pelo Chrome
+(em chrome://extensions, ative "Permitir acesso a URLs de arquivo" na extensão) ou sirva a pasta com um servidor local.</p>
+
+<h2>1. Textarea com rolagem (sublinhado pela camada espelho, precisa acompanhar a rolagem)</h2>
+<textarea rows="3">Este texto tem um eror e outro errrado.
+Linha 2 com muito muito repetido.
+Linha 3
+Linha 4 com eror
+Linha 5
+Linha 6 com errrado</textarea>
+
+<h2>2. Textarea começando com quebra de linha (offsets após trim)</h2>
+<textarea rows="4">
+
+   Texto com espaços antes e um eror aqui.</textarea>
+
+<h2>3. Input de texto</h2>
+<input type="text" value="Um campo com eror">
+
+<h2>4. Contenteditable com várias linhas (o sublinhado precisa ficar embaixo da palavra certa)</h2>
+<div class="ce" contenteditable="true"><p>Primeira linha sem problema.</p><p>Segunda linha com <b>negrito</b> e um eror.</p><p><br></p><p>Você teria disponibilidde em algum desses horários?</p></div>
+
+<h2>5. Contenteditable que rola por dentro (o bug do print)</h2>
+<div class="ce scroll-self" contenteditable="true">Linha 1 com eror<br>Linha 2<br>Linha 3<br>Linha 4 com errrado<br>Linha 5<br>Linha 6<br>Linha 7 com eror<br>Linha 8<br>Linha 9<br>Linha 10 com errrado</div>
+
+<h2>6. Contenteditable dentro de uma caixa com rolagem (estilo WhatsApp)</h2>
+<div class="scroll-parent">
+  <div class="ce" contenteditable="true">Linha 1 com eror<br>Linha 2<br>Linha 3<br>Linha 4 com errrado<br>Linha 5<br>Linha 6<br>Linha 7 com eror<br>Linha 8<br>Linha 9 com errrado</div>
+</div>
+
+<h2>7. Campo dentro de Shadow DOM</h2>
+<div id="shadowHost"></div>
+
+<h2>8. Campo dentro de iframe</h2>
+<iframe id="frame" style="width:100%;height:110px;border:1px solid #cbd5e1;border-radius:8px"
+  srcdoc="<body style='font:15px system-ui;margin:8px'><div contenteditable='true' style='border:1px solid #cbd5e1;padding:8px;min-height:50px'>Texto no iframe com eror.</div></body>"></iframe>
+
+<h2>9. Campo que começa escondido (modal)</h2>
+<button id="openModal">Abrir modal</button>
+<div class="modal" id="modal"><textarea rows="2">Campo do modal com eror.</textarea></div>
+
+<h2>10. Campos que devem ser ignorados (nenhum ponto pode aparecer)</h2>
+<input type="password" value="senhaerrada">
+<input type="text" name="CPF" value="123.456.789-00" style="margin-top:6px">
+<input type="text" autocomplete="username" value="usuarioo" style="margin-top:6px">
+<input type="text" autocomplete="one-time-code" value="123456" style="margin-top:6px">
+<textarea data-no-corretor rows="2" style="margin-top:6px">Texto com eror mas marcado para ignorar.</textarea>
+
+<script>
+  const host = document.getElementById('shadowHost');
+  const root = host.attachShadow({ mode: 'open' });
+  root.innerHTML = `<div contenteditable="true" style="font:15px system-ui;padding:8px;border:1px solid #cbd5e1;border-radius:8px;min-height:40px">Texto no shadow DOM com eror.</div>`;
+  document.getElementById('openModal').addEventListener('click', () => document.getElementById('modal').classList.toggle('open'));
+</script>
+</body>
+</html>

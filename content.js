@@ -1,253 +1,596 @@
 (() => {
   'use strict';
 
-  const LANGUAGETOOL_API = 'https://api.languagetool.org/v2/check';
-  const DEBOUNCE_MS = 600;
-  const MIN_CHARS   = 4;
-  const ERROR_TYPES = new Set(['misspelling', 'grammar', 'typographical', 'duplication', 'whitespace', 'non-conformance']);
-  const VERSION     = 'v12';
+  // Evita rodar duas vezes no mesmo frame
+  if (globalThis.__corretorPtBrLoaded) return;
+  globalThis.__corretorPtBrLoaded = true;
 
-  const BLOCKED_HOSTNAMES = ['docs.google.com'];
-  if (BLOCKED_HOSTNAMES.some(h => location.hostname === h || location.hostname.endsWith('.' + h))) {
-    throw new Error('[Corretor PT-BR] Desativado neste site.');
+  const S = globalThis.CorretorShared;
+  if (!S) return;
+
+  const DEBOUNCE_MS    = 800;
+  const MIN_CHARS      = 4;
+  const RETRY_MIN_MS   = 5000;
+  const MAX_CARD_ITEMS = 60;
+  const DOT_SIZE       = 24;
+  const DOT_GAP        = 4;
+  const ERROR_TYPES    = new Set(['misspelling', 'grammar', 'typographical', 'duplication', 'whitespace', 'non-conformance']);
+  const CODE_EDITORS   = '.CodeMirror, .cm-editor, .monaco-editor, .ace_editor';
+
+  // Mesmo conteúdo de highlight.css — usado em campos dentro de Shadow DOM, onde o CSS da página não chega
+  const HIGHLIGHT_CSS = `
+    ::highlight(corretor-error) { text-decoration: underline wavy rgba(239,68,68,0.95); text-decoration-thickness: 1.5px; text-underline-offset: 3px; background-color: rgba(239,68,68,0.10); }
+    ::highlight(corretor-hint)  { text-decoration: underline wavy rgba(168,85,247,0.95); text-decoration-thickness: 1.5px; text-underline-offset: 3px; background-color: rgba(168,85,247,0.08); }`;
+
+  /* ══ Configurações ══ */
+  const settings = {
+    language: 'pt-BR', picky: true, silentMode: false, theme: 'dark', uiLang: '',
+    disabledSites: [], aiSettings: {}, ignoredRules: [], ltServer: '',
+  };
+  let ignored = new Set();
+  let ignoredRuleIds = new Set();
+  let T = getT(settings.uiLang);
+
+  const ready = (async () => {
+    try {
+      Object.assign(settings, await chrome.storage.sync.get({ ...settings }));
+      T = getT(settings.uiLang);
+      ignored = toIgnoredSet(await S.loadDictionary());
+      ignoredRuleIds = S.ruleIdSet(settings.ignoredRules);
+    } catch { /* contexto da extensão invalidado */ }
+  })();
+
+  function toIgnoredSet(words) { return new Set(words.map(w => w.toLowerCase())); }
+
+  function pageHost() {
+    if (location.hostname) return location.hostname;
+    try { return new URL(location.ancestorOrigins?.[0] || '').hostname; } catch { return ''; }
   }
 
-  const SKIP_SELECTORS = [
-    'input[type="password"]', 'input[type="email"]', 'input[type="number"]',
-    'input[type="tel"]', 'input[type="url"]', 'input[type="search"]',
-    'input[type="date"]', 'input[type="time"]', 'input[type="color"]',
-    'input[autocomplete="cc-number"]', 'input[autocomplete="cc-exp"]',
-    'input[name*="cpf"]', 'input[name*="cnpj"]', 'input[name*="code"]',
-    'input[name*="codigo"]', 'input[name*="token"]', 'input[name*="pin"]',
-    '[data-no-corretor]',
-  ];
+  function isEnabled() {
+    return !settings.silentMode && !S.isHostDisabled(pageHost(), settings.disabledSites);
+  }
 
-  /* ── Settings ── */
-  let SETTINGS      = { language: 'pt-BR', picky: true, silentMode: false, theme: 'dark' };
-  let IGNORED_WORDS = new Set();
-  let AI_SETTINGS   = {};
-
-  chrome.storage.sync.get(
-    { language: 'pt-BR', picky: true, silentMode: false, ignoredWords: [], aiSettings: {}, theme: 'dark' },
-    s => {
-      SETTINGS      = s;
-      IGNORED_WORDS = new Set((s.ignoredWords || []).map(w => w.toLowerCase()));
-      AI_SETTINGS   = s.aiSettings || {};
-      applyThemeToCards();
+  let dictReloadTimer = null;
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'sync') return;
+    let recheck = false;
+    for (const k of ['language', 'picky', 'ltServer']) {
+      if (changes[k]) { settings[k] = changes[k].newValue; recheck = true; }
     }
-  );
-  chrome.storage.onChanged.addListener(changes => {
-    if (changes.language)     SETTINGS.language  = changes.language.newValue;
-    if (changes.picky)        SETTINGS.picky      = changes.picky.newValue;
-    if (changes.silentMode)   SETTINGS.silentMode = changes.silentMode.newValue;
-    if (changes.ignoredWords) IGNORED_WORDS       = new Set(changes.ignoredWords.newValue.map(w => w.toLowerCase()));
-    if (changes.aiSettings)   AI_SETTINGS         = changes.aiSettings.newValue || {};
-    if (changes.theme)        { SETTINGS.theme = changes.theme.newValue; applyThemeToCards(); }
+    if (changes.ignoredRules) {
+      settings.ignoredRules = changes.ignoredRules.newValue || [];
+      ignoredRuleIds = S.ruleIdSet(settings.ignoredRules);
+      if (current) refilter(current);
+    }
+    if (changes.silentMode)    settings.silentMode    = !!changes.silentMode.newValue;
+    if (changes.disabledSites) settings.disabledSites = changes.disabledSites.newValue || [];
+    if (changes.aiSettings)    settings.aiSettings    = changes.aiSettings.newValue || {};
+    if (changes.theme)         { settings.theme = changes.theme.newValue; applyTheme(); }
+    if (changes.uiLang)        { settings.uiLang = changes.uiLang.newValue; T = getT(settings.uiLang); if (ui) ui.aiBtn.title = T.cAiBtnTitle; }
+    if (S.isDictionaryChange(changes)) {
+      clearTimeout(dictReloadTimer);
+      dictReloadTimer = setTimeout(async () => {
+        try { ignored = toIgnoredSet(await S.loadDictionary()); } catch { return; }
+        if (current) refilter(current);
+      }, 200);
+    }
+    if (!isEnabled()) { detach(); return; }
+    if (recheck && current) forceRecheck(current, 0);
+    schedulePosition();
   });
 
-  function applyThemeToCards() {
-    const isDark = SETTINGS.theme !== 'light';
-    document.querySelectorAll('.corretor-card, .corretor-indicator, .corretor-ai-btn').forEach(el => {
-      el.setAttribute('data-theme', isDark ? 'dark' : 'light');
-    });
+  /* ══ Utilidades ══ */
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  function escapeHtml(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function h(tag, className, text) {
+    const n = document.createElement(tag);
+    if (className) n.className = className;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function themeAttr() { return settings.theme === 'light' ? 'light' : 'dark'; }
+  function sameText(a, b) { return a.replace(/\s+/g, ' ').trim() === b.replace(/\s+/g, ' ').trim(); }
+
+  async function send(msg) {
+    try {
+      const r = await chrome.runtime.sendMessage(msg);
+      return r || { ok: false, error: { code: 'unknown' } };
+    } catch (e) {
+      const m = String(e?.message || e);
+      return { ok: false, error: { code: /context invalidated/i.test(m) ? 'context' : 'unknown', message: m } };
+    }
   }
 
-  function addToIgnored(word) {
-    const norm = word.trim();
-    if (!norm) return;
-    chrome.storage.sync.get({ ignoredWords: [] }, data => {
-      if (data.ignoredWords.some(w => w.toLowerCase() === norm.toLowerCase())) return;
-      chrome.storage.sync.set({ ignoredWords: [...data.ignoredWords, norm] });
-    });
+  function errorText(err = {}) {
+    switch (err.code) {
+      case 'rate':         return T.cErrRate;
+      case 'unavailable':  return T.cErrUnavailable;
+      case 'network':      return T.cErrNetwork;
+      case 'too-long':     return T.cErrTooLong;
+      case 'http':         return T.cErrHttp(err.status);
+      case 'context':      return T.cErrContext;
+      case 'server-unreachable': return T.cErrServerUnreachable;
+      case 'server-permission':  return T.cErrServerPermission;
+      case 'no-ai':        return T.cConfigureAI;
+      case 'ai-too-long':  return T.cErrAiTooLong(err.max || S.AI_MAX_CHARS);
+      case 'ai-truncated': return T.cErrAiTruncated;
+      case 'ai-empty':     return T.cErrAiEmpty;
+      case 'ai-http':      return err.message || T.cErrUnknown;
+      default:             return T.cErrUnknown;
+    }
   }
 
-  /* ── Histórico de sugestões IA (máx 10) ── */
-  function saveAIHistory(original, result, aiName) {
-    chrome.storage.local.get({ aiHistory: [] }, data => {
-      const entry   = { original, result, aiName, date: Date.now() };
-      const updated = [entry, ...data.aiHistory].slice(0, 10);
-      chrome.storage.local.set({ aiHistory: updated });
-    });
+  /* ══ Texto do campo ══
+     Para contenteditable, montamos o texto e, ao mesmo tempo, o mapa texto → nós do DOM.
+     O texto enviado ao LanguageTool é exatamente este, então os offsets batem com o DOM
+     (antes era innerText, que conta quebras de linha que o mapa não contava). */
+  const BLOCK_TAGS = new Set(['ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DD', 'DIV', 'DL', 'DT', 'FIELDSET',
+    'FIGCAPTION', 'FIGURE', 'FOOTER', 'FORM', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HEADER', 'HR', 'LI', 'MAIN',
+    'NAV', 'OL', 'P', 'PRE', 'SECTION', 'TABLE', 'TR', 'UL']);
+  const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'TEMPLATE', 'NOSCRIPT']);
+
+  function buildTextModel(root) {
+    let text = '';
+    const segs = [];
+    const breakLine = () => { if (text && !text.endsWith('\n')) text += '\n'; };
+    (function walk(node) {
+      for (let child = node.firstChild; child; child = child.nextSibling) {
+        if (child.nodeType === Node.TEXT_NODE) {
+          const v = child.nodeValue;
+          if (!v) continue;
+          segs.push({ node: child, start: text.length, end: text.length + v.length });
+          text += v;
+        } else if (child.nodeType === Node.ELEMENT_NODE) {
+          const tag = child.tagName;
+          if (tag === 'BR') { text += '\n'; continue; }
+          if (SKIP_TAGS.has(tag)) continue;
+          const block = BLOCK_TAGS.has(tag);
+          if (block) breakLine();
+          walk(child);
+          if (block) breakLine();
+        }
+      }
+    })(root);
+    return { text, segs };
   }
 
-  /* ── IA ── */
-  function getActiveAI() {
-    for (const ai of ['groq', 'gemini', 'deepseek', 'openai', 'claude']) {
-      const cfg = AI_SETTINGS[ai];
-      if (cfg?.enabled && cfg?.verified && cfg?.key) return { ai, key: cfg.key };
+  function getFieldText(el) {
+    return el.isContentEditable ? buildTextModel(el).text : (el.value || '');
+  }
+
+  function positionAt(model, offset, isEnd) {
+    const segs = model.segs;
+    let lo = 0, hi = segs.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const s = segs[mid];
+      if (offset < s.start) hi = mid - 1;
+      else if (offset > s.end || (offset === s.end && !isEnd)) lo = mid + 1;
+      else return { node: s.node, offset: offset - s.start };
     }
     return null;
   }
 
-  async function callAI(ai, key, text, tone = 'default') {
-    const toneMap = {
-      default: 'Corrija os erros gramaticais e ortográficos, melhore a clareza onde necessário e complete frases incompletas. Preserve ao máximo o estilo, tom e voz original do autor. Faça apenas o mínimo necessário',
-      formal:  'Corrija os erros e ajuste sutilmente o tom para mais formal e profissional, preservando o sentido e estrutura original',
-      direct:  'Corrija os erros e torne o texto ligeiramente mais direto e objetivo, sem alterar a essência da mensagem',
-      short:   'Corrija os erros e remova redundâncias, mantendo o significado completo em menos palavras',
-    };
-    const instruction = toneMap[tone] || toneMap.default;
-    const prompt = `${instruction}. IMPORTANTE: preserve todas as quebras de linha e formatação original do texto. Retorne APENAS o texto corrigido, sem explicações, sem comentários, sem aspas, sem formatação extra:\n\n${text}`;
-
-    const configs = {
-      groq:     { url: 'https://api.groq.com/openai/v1/chat/completions',    body: { model: 'llama-3.3-70b-versatile', messages: [{ role: 'user', content: prompt }], max_tokens: 1000 }, headers: { 'Authorization': `Bearer ${key}` }, path: r => r.choices?.[0]?.message?.content?.trim() },
-      gemini:   { url: `https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key=${key}`, body: { contents: [{ parts: [{ text: prompt }] }] }, headers: {}, path: r => r.candidates?.[0]?.content?.parts?.[0]?.text?.trim() },
-      deepseek: { url: 'https://api.deepseek.com/chat/completions',          body: { model: 'deepseek-chat', messages: [{ role: 'user', content: prompt }], max_tokens: 1000 }, headers: { 'Authorization': `Bearer ${key}` }, path: r => r.choices?.[0]?.message?.content?.trim() },
-      openai:   { url: 'https://api.openai.com/v1/chat/completions',         body: { model: 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }], max_tokens: 1000 }, headers: { 'Authorization': `Bearer ${key}` }, path: r => r.choices?.[0]?.message?.content?.trim() },
-      claude:   { url: 'https://api.anthropic.com/v1/messages',              body: { model: 'claude-haiku-4-5-20251001', max_tokens: 1000, messages: [{ role: 'user', content: prompt }] }, headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, path: r => r.content?.[0]?.text?.trim() },
-    };
-    const cfg = configs[ai];
-    if (!cfg) throw new Error('IA não configurada');
-    const r = await fetch(cfg.url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...cfg.headers }, body: JSON.stringify(cfg.body) });
-    if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e?.error?.message || `${ai} HTTP ${r.status}`); }
-    return cfg.path(await r.json()) || '';
+  function rangeFor(model, offset, length) {
+    const a = positionAt(model, offset, false);
+    const b = positionAt(model, offset + length, true);
+    if (!a || !b) return null;
+    try {
+      const r = document.createRange();
+      r.setStart(a.node, a.offset);
+      r.setEnd(b.node, b.offset);
+      return r;
+    } catch { return null; }
   }
 
-  /* ── Utilidades ── */
-  function sleep(ms)    { return new Promise(r => setTimeout(r, ms)); }
-  function isVisible(el) { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; }
-  function isInViewport(el) {
+  /* ══ Sublinhado: CSS Custom Highlight API ══
+     O próprio navegador pinta o sublinhado no texto. Ele rola junto, é cortado na borda da caixa,
+     acompanha mudanças de layout e não bloqueia cliques. */
+  const HL = (() => {
+    try {
+      if (!CSS.highlights || typeof Highlight !== 'function') return null;
+      const error = new Highlight();
+      const hint  = new Highlight();
+      error.priority = 1;
+      CSS.highlights.set('corretor-error', error);
+      CSS.highlights.set('corretor-hint', hint);
+      return { error, hint };
+    } catch { return null; }
+  })();
+
+  const styledRoots = new WeakSet();
+  function ensureHighlightStyle(el) {
+    const root = el.getRootNode();
+    if (!(root instanceof ShadowRoot) || styledRoots.has(root)) return;
+    styledRoots.add(root);
+    try {
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(HIGHLIGHT_CSS);
+      root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
+    } catch { /* sem sublinhado neste campo */ }
+  }
+
+  const rangeOf = new WeakMap(); // match → Range vivo (acompanha edições no DOM)
+
+  function clearHighlights() {
+    if (HL) { HL.error.clear(); HL.hint.clear(); }
+    hideMirror();
+  }
+
+  function renderHighlights(el) {
+    clearHighlights();
+    if (el !== current) return;
+    if (!el.isContentEditable) { renderMirror(el); return; }
+    if (!HL) return;
+    const st = getState(el);
+    const model = buildTextModel(el);
+    const unchanged = model.text === st.text;
+    for (const m of [...st.errors, ...st.hints]) {
+      const off = unchanged ? m.offset : S.relocate(model.text, m.wrong, m.offset, 200);
+      if (off < 0) continue;
+      const r = rangeFor(model, off, m.length);
+      if (!r) continue;
+      rangeOf.set(m, r);
+      (ERROR_TYPES.has(m.issueType) ? HL.error : HL.hint).add(r);
+    }
+  }
+
+  /* ══ Sublinhado em textarea/input: camada espelho ══
+     Esses campos não deixam marcar o texto por dentro. Desenhamos uma cópia transparente do texto,
+     com os mesmos estilos e a mesma rolagem, por cima do campo; só o sublinhado fica visível.
+     A camada não recebe cliques, então o campo continua funcionando normalmente. */
+  const MIRROR_PROPS = ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'fontFamily', 'fontSize',
+    'fontWeight', 'fontStyle', 'fontVariant', 'fontStretch', 'fontKerning', 'fontFeatureSettings', 'lineHeight',
+    'letterSpacing', 'wordSpacing', 'textTransform', 'textIndent', 'textAlign', 'direction', 'tabSize', 'wordBreak'];
+  let mirror = null;      // { clip, box }
+  let mirrorSpans = [];   // [{ off, len, m }] posições atuais dos erros no valor do campo
+
+  function ensureMirror() {
+    const u = ensureUI();
+    if (mirror && mirror.clip.isConnected) return mirror;
+    const clip = h('div', 'corretor-mirror-clip');
+    const box  = h('div', 'corretor-mirror');
+    clip.appendChild(box);
+    u.root.insertBefore(clip, u.indicator); // abaixo do ponto e dos cards
+    mirror = { clip, box };
+    return mirror;
+  }
+
+  function hideMirror() {
+    mirrorSpans = [];
+    if (!mirror) return;
+    mirror.clip.style.display = 'none';
+    mirror.box.textContent = '';
+  }
+
+  function renderMirror(el) {
+    hideMirror();
+    const st = getState(el);
+    const marks = [...st.errors, ...st.hints];
+    if (!marks.length) return;
+    const text = el.value || '';
+    const unchanged = text === st.text;
+    const spans = [];
+    for (const m of marks) {
+      const off = unchanged ? m.offset : S.relocate(text, m.wrong, m.offset, 200);
+      if (off >= 0) spans.push({ off, len: m.length, m });
+    }
+    if (!spans.length) return;
+    spans.sort((a, b) => a.off - b.off);
+
+    const { box } = ensureMirror();
+    let pos = 0;
+    for (const s of spans) {
+      if (s.off < pos) continue;
+      if (s.off > pos) box.appendChild(document.createTextNode(text.slice(pos, s.off)));
+      const hint = !ERROR_TYPES.has(s.m.issueType);
+      box.appendChild(h('span', hint ? 'corretor-mark-hint' : 'corretor-mark-error', text.substr(s.off, s.len)));
+      pos = s.off + s.len;
+      mirrorSpans.push(s);
+    }
+    box.appendChild(document.createTextNode(text.slice(pos) + '​')); // mantém a altura da última linha vazia
+
+    const cs = getComputedStyle(el);
+    for (const p of MIRROR_PROPS) box.style[p] = cs[p];
+    if (el.tagName === 'INPUT') {
+      // input: uma linha, centralizada na vertical
+      const contentH = el.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+      box.style.whiteSpace   = 'pre';
+      box.style.overflowWrap = 'normal';
+      box.style.lineHeight   = contentH + 'px';
+    } else {
+      box.style.whiteSpace   = 'pre-wrap';
+      box.style.overflowWrap = 'break-word';
+    }
+    syncMirror(el);
+  }
+
+  // Acompanha posição, tamanho e rolagem do campo (chamado a cada quadro de scroll/resize)
+  function syncMirror(el) {
+    if (!mirror || !mirrorSpans.length || el.isContentEditable) return;
+    const vr = visibleRect(el);
+    if (!vr) { mirror.clip.style.display = 'none'; return; }
     const r = el.getBoundingClientRect();
-    if (r.width === 0 || r.height === 0) return false;
-    return r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth;
-  }
-  function getTextFrom(el)   { return el.isContentEditable ? (el.innerText || el.textContent || '') : (el.value || ''); }
-  function wordCount(text)   { return text.trim().split(/\s+/).filter(Boolean).length; }
-  function charCount(text)   { return text.length; }
-  function escapeHtml(str)   { return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-  function shouldSkipField(el) { return SKIP_SELECTORS.some(sel => el.matches?.(sel)); }
-
-  /* ── Cache de resultados ── */
-  const resultCache = new Map();
-  const CACHE_MAX   = 50;
-  function cacheGet(text) { return resultCache.get(text); }
-  function cacheSet(text, value) {
-    if (resultCache.size >= CACHE_MAX) resultCache.delete(resultCache.keys().next().value);
-    resultCache.set(text, value);
+    const { clip, box } = mirror;
+    clip.style.display = 'block';
+    clip.style.left    = vr.left + 'px';
+    clip.style.top     = vr.top + 'px';
+    clip.style.width   = (vr.right - vr.left) + 'px';
+    clip.style.height  = (vr.bottom - vr.top) + 'px';
+    box.style.left     = (r.left + el.clientLeft - vr.left) + 'px';
+    box.style.top      = (r.top + el.clientTop - vr.top) + 'px';
+    box.style.width    = el.clientWidth + 'px';
+    box.style.height   = el.clientHeight + 'px';
+    box.scrollTop      = el.scrollTop;
+    box.scrollLeft     = el.scrollLeft;
   }
 
-  /* ── Cache do fiber React por elemento ── */
-  const reactFiberCache = new WeakMap();
-  function getReactFiberKey(el) {
-    if (reactFiberCache.has(el)) return reactFiberCache.get(el);
-    const key = Object.keys(el).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')) || null;
-    reactFiberCache.set(el, key);
-    return key;
-  }
-
-  /* ── Setters — FIX #8: preserva quebras de linha ── */
-  function setInputText(el, text) {
-    const proto = el instanceof HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-    const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-    if (nativeSetter) nativeSetter.call(el, text); else el.value = text;
-    el.dispatchEvent(new Event('input',  { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  }
-
-  function setContentEditableText(el, text) {
-    el.focus();
-    // Estratégia 1: innerText — preserva \n nativamente na maioria dos sites
-    // É o método mais confiável para manter quebras de linha
-    const prev = el.innerText || el.textContent || '';
-    if (prev.trim() === text.trim()) return; // nada a fazer
-
-    // Tenta via execCommand (compatível com React/Vue que escutam eventos de input)
-    try {
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
-      const ok = document.execCommand('insertText', false, text);
-      if (ok && (el.innerText || el.textContent || '').trim() === text.trim()) return;
-    } catch (e) { /* fallback abaixo */ }
-
-    // Fallback: innerText preserva \n → <br> nativamente
-    el.innerText = text;
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  }
-
-  function triggerReactInput(el, text) {
-    const fiberKey = getReactFiberKey(el);
-    if (!fiberKey) return false;
-    let node = el[fiberKey];
-    while (node) {
-      const props = node.memoizedProps || node.pendingProps;
-      if (props && typeof props.onChange === 'function') {
-        el.innerHTML = ''; el.appendChild(document.createTextNode(text));
-        props.onChange({ target: el, currentTarget: el, type: 'input',
-          nativeEvent: new InputEvent('input', { bubbles: true, data: text }),
-          bubbles: true, preventDefault: () => {}, stopPropagation: () => {} });
-        return true;
+  // Durante a digitação, tira só os sublinhados cujo trecho foi editado
+  function pruneStaleHighlights(el) {
+    if (!el.isContentEditable) { renderMirror(el); return; }
+    if (!HL) return;
+    const st = getState(el);
+    for (const m of [...st.errors, ...st.hints]) {
+      const r = rangeOf.get(m);
+      if (r && (r.collapsed || r.toString() !== m.wrong)) {
+        HL.error.delete(r); HL.hint.delete(r); rangeOf.delete(m);
       }
-      node = node.return;
-    }
-    return false;
-  }
-  function isWhatsApp() { return location.hostname.includes('web.whatsapp.com'); }
-  async function setWhatsAppText(el, newText) {
-    el.focus(); await sleep(30);
-    const reactWorked = triggerReactInput(el, newText);
-    if (reactWorked) { await sleep(50); if ((el.innerText || el.textContent || '').trim() === newText.trim()) return; }
-    try {
-      const range = document.createRange(); range.selectNodeContents(el);
-      const sel   = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
-      await sleep(20); document.execCommand('delete', false, null);
-      await sleep(20); document.execCommand('insertText', false, newText);
-      await sleep(30); if ((el.innerText || el.textContent || '').trim() === newText.trim()) return;
-    } catch(e) {}
-    el.innerHTML = ''; el.appendChild(document.createTextNode(newText));
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: newText }));
-  }
-  async function smartSetText(el, text) {
-    if (isWhatsApp() && el.isContentEditable) await setWhatsAppText(el, text);
-    else if (el.isContentEditable) setContentEditableText(el, text);
-    else setInputText(el, text);
-  }
-
-  /* ── API LanguageTool ── */
-  async function checkText(text, signal) {
-    const cached = cacheGet(text);
-    if (cached) return cached;
-    try {
-      const params = {
-        text,
-        language: SETTINGS.language,
-        enabledOnly: 'false',
-        picky: 'true',
-        level: 'picky'
-      };
-      const res = await fetch(LANGUAGETOOL_API, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body:    new URLSearchParams(params).toString(),
-        signal,
-      });
-      if (!res.ok) {
-        let msg = `Erro HTTP ${res.status}`;
-        if (res.status === 429) msg = 'Limite de requisições atingido. Aguarde alguns instantes.';
-        else if (res.status === 503) msg = 'Serviço indisponível. A API do LanguageTool está fora do ar.';
-        return { errors: [], hints: [], apiError: msg };
-      }
-      const allMatches = (await res.json()).matches || [];
-      const matches = allMatches.filter(m => {
-        const word = (m.context?.text || '').substring(m.context?.offset || 0, (m.context?.offset || 0) + (m.context?.length || 0));
-        return !IGNORED_WORDS.has(word.toLowerCase());
-      });
-      const result = {
-        errors: matches.filter(m =>  ERROR_TYPES.has(m.rule?.issueType)),
-        hints:  matches.filter(m => !ERROR_TYPES.has(m.rule?.issueType)),
-      };
-      cacheSet(text, result);
-      return result;
-    } catch(e) {
-      if (e.name === 'AbortError') return null;
-      return { errors: [], hints: [], apiError: 'Sem conexão ou API inacessível.' };
     }
   }
 
-  /* ── Ícones ── */
+  /* ══ Estado por campo ══ */
+  const states = new WeakMap();
+  function getState(el) {
+    let st = states.get(el);
+    if (!st) {
+      st = { gen: 0, lastKey: null, text: '', matches: [], errors: [], hints: [], status: 'ok',
+             apiError: null, typed: false, debounce: null, retry: null };
+      states.set(el, st);
+    }
+    return st;
+  }
+
+  let current = null;       // campo focado
+  let clipAncestors = [];   // ancestrais com overflow que recortam o campo
+
+  /* ══ Descoberta de campos (delegação de foco, sem varrer a página) ══ */
+  function resolveField(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) return null;
+    const tag = node.tagName;
+    if (tag === 'TEXTAREA') return node;
+    if (tag === 'INPUT') return (node.type || 'text').toLowerCase() === 'text' ? node : null;
+    if (node.isContentEditable) {
+      let host = node;
+      while (host.parentElement && host.parentElement.isContentEditable) host = host.parentElement;
+      return host;
+    }
+    return null;
+  }
+
+  function isEligible(el) {
+    if (!el || !el.isConnected) return false;
+    if (el.disabled || el.readOnly) return false;
+    if (el.closest('[data-no-corretor]') || el.closest(CODE_EDITORS)) return false;
+    return !S.isSensitiveField({
+      tag: el.tagName, type: el.getAttribute('type'), name: el.getAttribute('name'), id: el.id,
+      autocomplete: el.getAttribute('autocomplete'), inputmode: el.getAttribute('inputmode'),
+    });
+  }
+
+  function deepActiveElement() {
+    let a = document.activeElement;
+    while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+    return a;
+  }
+
+  function isFieldFocused(el) {
+    const a = el.getRootNode().activeElement;
+    return !!a && (a === el || el.contains(a));
+  }
+
+  function isOwnUI(e) {
+    return !!ui && e.composedPath().includes(ui.host);
+  }
+
+  function computeClipAncestors(el) {
+    const list = [];
+    let node = el.parentElement || el.getRootNode().host;
+    for (let depth = 0; node && node !== document.documentElement && depth < 40; depth++) {
+      const cs = getComputedStyle(node);
+      if (cs.overflowX !== 'visible' || cs.overflowY !== 'visible') list.push(node);
+      node = node.parentElement || (node.getRootNode() instanceof ShadowRoot ? node.getRootNode().host : null);
+    }
+    return list;
+  }
+
+  const resizeObs = new ResizeObserver(() => schedulePosition());
+
+  function attach(el) {
+    if (current === el) { schedulePosition(); return; }
+    detach();
+    current = el;
+    clipAncestors = computeClipAncestors(el);
+    ensureHighlightStyle(el);
+    resizeObs.observe(el);
+    renderHighlights(el);
+    if (getFieldText(el).trim().length >= MIN_CHARS) scheduleCheck(el, 300);
+    schedulePosition();
+  }
+
+  function detach() {
+    if (!current) return;
+    const st = states.get(current);
+    if (st) { clearTimeout(st.debounce); clearTimeout(st.retry); }
+    resizeObs.unobserve(current);
+    clearHighlights();
+    closeAllCards();
+    current = null;
+    clipAncestors = [];
+    hideUI();
+  }
+
+  async function onFocusIn(e) {
+    if (isOwnUI(e)) return;
+    const field = resolveField(e.composedPath()[0]);
+    if (!field) return;
+    await ready;
+    if (!isEnabled() || !isEligible(field)) return;
+    attach(field);
+  }
+
+  function onFocusOut(e) {
+    if (!current || !e.composedPath().includes(current)) return;
+    const el = current;
+    setTimeout(() => {
+      if (current !== el || isFieldFocused(el) || anyCardOpen()) return;
+      detach();
+    }, 150);
+  }
+
+  function onInput(e) {
+    if (isOwnUI(e)) return;
+    const path = e.composedPath();
+    if (!current || !path.includes(current)) {
+      const f = resolveField(path[0]);
+      if (!f || !isEnabled() || !isEligible(f)) return;
+      attach(f);
+    }
+    const st = getState(current);
+    st.typed = true;
+    pruneStaleHighlights(current);
+    scheduleCheck(current);
+    schedulePosition();
+  }
+
+  // Clique numa palavra sublinhada abre o card daquele erro (sem impedir o cursor de ir para lá)
+  function onDocClick(e) {
+    if (!current || isOwnUI(e) || !e.composedPath().includes(current)) return;
+    if (!current.isContentEditable) {
+      // textarea/input: o cursor já foi para o ponto clicado; vê se caiu dentro de um erro
+      const el = current;
+      setTimeout(() => {
+        if (el !== current || el.selectionStart !== el.selectionEnd) return;
+        const pos = el.selectionStart;
+        const hit = mirrorSpans.find(s => pos > s.off && pos < s.off + s.len);
+        if (hit) openErrorsCard(el, hit.m);
+      }, 0);
+      return;
+    }
+    if (!HL) return;
+    const st = getState(current);
+    const root = current.getRootNode();
+    let pos = null;
+    try {
+      if (document.caretPositionFromPoint) {
+        const p = root instanceof ShadowRoot
+          ? document.caretPositionFromPoint(e.clientX, e.clientY, { shadowRoots: [root] })
+          : document.caretPositionFromPoint(e.clientX, e.clientY);
+        if (p) pos = { node: p.offsetNode, offset: p.offset };
+      } else if (document.caretRangeFromPoint) {
+        const r = document.caretRangeFromPoint(e.clientX, e.clientY);
+        if (r) pos = { node: r.startContainer, offset: r.startOffset };
+      }
+    } catch { return; }
+    if (!pos) return;
+    const hit = [...st.errors, ...st.hints].find(m => {
+      const r = rangeOf.get(m);
+      try { return r && !r.collapsed && r.isPointInRange(pos.node, pos.offset); } catch { return false; }
+    });
+    if (hit) openErrorsCard(current, hit);
+  }
+
+  function onKeyDown(e) {
+    if (e.key !== 'Escape' || !anyCardOpen()) return;
+    // Fecha só o nosso card, sem fechar junto o que o site trata com Esc
+    e.stopPropagation();
+    e.preventDefault();
+    closeTopCard();
+  }
+
+  function onDocMouseDown(e) {
+    if (!anyCardOpen() || isOwnUI(e)) return;
+    closeAllCards();
+  }
+
+  document.addEventListener('focusin', onFocusIn, true);
+  document.addEventListener('focusout', onFocusOut, true);
+  document.addEventListener('input', onInput, true);
+  document.addEventListener('click', onDocClick, true);
+  document.addEventListener('keydown', onKeyDown, true);
+  document.addEventListener('mousedown', onDocMouseDown, true);
+  window.addEventListener('scroll', () => schedulePosition(), { capture: true, passive: true });
+  window.addEventListener('resize', () => schedulePosition(), { passive: true });
+
+  // Campo que já estava focado antes do script carregar (autofocus)
+  ready.then(() => {
+    const f = resolveField(deepActiveElement());
+    if (f && isEnabled() && isEligible(f)) attach(f);
+  });
+
+  /* ══ Análise ══ */
+  function scheduleCheck(el, delay = DEBOUNCE_MS) {
+    const st = getState(el);
+    clearTimeout(st.debounce);
+    st.debounce = setTimeout(() => analyze(el), delay);
+  }
+
+  function forceRecheck(el, delay = 300) {
+    getState(el).lastKey = null;
+    scheduleCheck(el, delay);
+  }
+
+  async function analyze(el) {
+    if (el !== current || !isEnabled()) return;
+    const st = getState(el);
+    clearTimeout(st.retry);
+
+    const text = getFieldText(el);
+    const key  = `${settings.language}|${settings.picky ? 1 : 0}|${text}`;
+    if (key === st.lastKey) return;
+    st.lastKey = key;
+    const gen = ++st.gen;
+
+    if (text.trim().length < MIN_CHARS) {
+      st.text = text; st.matches = []; st.apiError = null;
+      refilter(el);
+      return;
+    }
+
+    setStatus(el, 'loading');
+    const res = await send({ type: 'lt-check', text, language: settings.language, picky: !!settings.picky });
+    if (gen !== st.gen) return; // chegou uma análise mais nova
+
+    if (!res.ok) {
+      st.lastKey  = null; // permite tentar de novo com o mesmo texto
+      st.apiError = errorText(res.error);
+      setStatus(el, 'api-error');
+      if (!['context', 'too-long', 'server-permission'].includes(res.error.code)) {
+        st.retry = setTimeout(() => analyze(el), Math.max(RETRY_MIN_MS, res.error.retryAfterMs || 15000));
+      }
+      return;
+    }
+
+    st.apiError = null;
+    st.text     = text;
+    st.matches  = res.matches.map(m => ({ ...m, wrong: text.substr(m.offset, m.length) }));
+    refilter(el);
+  }
+
+  // Aplica dicionário e opção de dicas sem nova requisição
+  function refilter(el) {
+    const st = getState(el);
+    const visible = st.matches.filter(m => !ignored.has(m.wrong.toLowerCase()) && !ignoredRuleIds.has(m.ruleId));
+    st.errors = visible.filter(m => ERROR_TYPES.has(m.issueType));
+    st.hints  = settings.picky ? visible.filter(m => !ERROR_TYPES.has(m.issueType)) : [];
+    if (!st.apiError) setStatus(el, st.errors.length ? 'error' : st.hints.length ? 'hint' : 'ok');
+    renderHighlights(el);
+    if (cards.errors && cards.errors.el === el) openErrorsCard(el);
+  }
+
+  /* ══ Interface (Shadow DOM: o CSS do site não afeta a extensão e vice-versa) ══ */
   const ICONS = {
     ok:          `<svg viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1.5 5L4 7.5L8.5 2.5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
     loading:     `<svg viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 1h6M2 9h6M3 1v2.2L5 5l-2 1.8V9M7 1v2.2L5 5l2 1.8V9" stroke="white" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
@@ -258,310 +601,248 @@
   const ICON_STAR = `<svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M10 2L12.5 7.5H18L13.5 11L15.5 17L10 13.5L4.5 17L6.5 11L2 7.5H7.5L10 2Z" stroke="white" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
   const ICON_SPIN = `<svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="10" cy="10" r="7" stroke="white" stroke-width="1.8" stroke-dasharray="22" stroke-dashoffset="8"><animateTransform attributeName="transform" type="rotate" from="0 10 10" to="360 10 10" dur="0.8s" repeatCount="indefinite"/></circle></svg>`;
 
-  const CLICKABLE_STATES = new Set(['error', 'hint', 'api-error']);
-  function getIndicatorState(errors, hints) {
-    if (errors.length > 0) return 'error';
-    if (hints.length  > 0) return 'hint';
-    return 'ok';
-  }
-  function applyIndicatorState(indicator, state, errorMsg) {
-    indicator.className    = `corretor-indicator ${state}`;
-    indicator.setAttribute('data-theme', SETTINGS.theme !== 'light' ? 'dark' : 'light');
-    indicator.innerHTML    = ICONS[state] || ICONS.ok;
-    indicator._apiErrorMsg = errorMsg || null;
-    indicator.style.removeProperty('pointer-events');
-    indicator.style.removeProperty('cursor');
+  let ui = null;
+
+  function isScrollbarClick(e) {
+    const t = e.composedPath()[0];
+    return t instanceof Element && t.clientWidth > 0 && (e.offsetX > t.clientWidth || e.offsetY > t.clientHeight);
   }
 
-  /* ══════════════════════════════════════════════════════
-     SUBLINHADO INLINE — FIX #6: sublinhado mais visual e espesso
-  ══════════════════════════════════════════════════════ */
-  const underlayMap = new WeakMap();
+  function ensureUI() {
+    if (ui && ui.host.isConnected) return ui;
+    if (ui) { document.documentElement.appendChild(ui.host); return ui; }
+    const host = document.createElement('corretor-ptbr-ui');
+    host.style.cssText = 'all:initial;position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;';
+    const root = host.attachShadow({ mode: 'closed' });
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    try { link.href = chrome.runtime.getURL('ui.css'); } catch { /* extensão recarregada */ }
+    root.appendChild(link);
 
-  function getOrCreateUnderlay(el) {
-    if (underlayMap.has(el)) return underlayMap.get(el);
-    const overlay = document.createElement('div');
-    overlay.className = 'corretor-underlay';
-    overlay.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483640;overflow:hidden;';
-    document.body.appendChild(overlay);
-    underlayMap.set(el, overlay);
-    return overlay;
+    const indicator = h('div', 'corretor-indicator ok');
+    const aiBtn     = h('div', 'corretor-ai-btn');
+    const toastEl   = h('div', 'corretor-toast');
+    const errToast  = h('div', 'corretor-api-error-toast');
+    indicator.style.display = 'none';
+    aiBtn.style.display     = 'none';
+    aiBtn.innerHTML = ICON_STAR;
+    aiBtn.title     = T.cAiBtnTitle;
+    root.append(indicator, aiBtn, toastEl, errToast);
+
+    // Clicar na interface não tira o foco do campo
+    root.addEventListener('mousedown', e => { if (!isScrollbarClick(e)) e.preventDefault(); });
+    indicator.addEventListener('click', onIndicatorClick);
+    aiBtn.addEventListener('click', () => { if (current) runAI(current); });
+
+    document.documentElement.appendChild(host);
+    ui = { host, root, indicator, aiBtn, toastEl, errToast };
+    applyTheme();
+    return ui;
   }
 
-  function repositionUnderlay(el) {
-    const overlay = underlayMap.get(el);
-    if (!overlay) return;
+  function applyTheme() {
+    if (!ui) return;
+    ui.root.querySelectorAll('.corretor-indicator, .corretor-ai-btn, .corretor-card').forEach(n => n.setAttribute('data-theme', themeAttr()));
+  }
+
+  function hideUI() {
+    if (!ui) return;
+    ui.indicator.style.display = 'none';
+    ui.aiBtn.style.display     = 'none';
+  }
+
+  function setStatus(el, status) {
+    const st = getState(el);
+    st.status = status;
+    if (el !== current || !ui) { schedulePosition(); return; }
+    ui.indicator.className = `corretor-indicator ${status}`;
+    ui.indicator.setAttribute('data-theme', themeAttr());
+    ui.indicator.innerHTML = ICONS[status] || ICONS.ok;
+    schedulePosition();
+  }
+
+  function setAILoading(on) {
+    if (!ui) return;
+    ui.aiBtn.classList.toggle('loading', on);
+    ui.aiBtn.innerHTML = on ? ICON_SPIN : ICON_STAR;
+  }
+
+  // Parte do campo realmente visível (recortada pela janela e pelas caixas com rolagem)
+  function visibleRect(el) {
     const r = el.getBoundingClientRect();
-    overlay.style.left   = r.left + 'px';
-    overlay.style.top    = r.top  + 'px';
-    overlay.style.width  = r.width  + 'px';
-    overlay.style.height = r.height + 'px';
-  }
-
-  function clearUnderlay(el) {
-    const overlay = underlayMap.get(el);
-    if (overlay) overlay.innerHTML = '';
-  }
-
-  function removeUnderlay(el) {
-    const overlay = underlayMap.get(el);
-    if (overlay) { overlay.remove(); underlayMap.delete(el); }
-  }
-
-  function drawUnderlines(el, errors, hints) {
-    if (!el.isContentEditable) return;
-
-    const overlay = getOrCreateUnderlay(el);
-    overlay.innerHTML = '';
-    repositionUnderlay(el);
-
-    const elRect     = el.getBoundingClientRect();
-    const allMatches = [
-      ...errors.map(m => ({ ...m, isHint: false })),
-      ...hints.map(m  => ({ ...m, isHint: true  })),
-    ];
-
-    const nodeMap = [];
-    const walker  = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null, false);
-    let tn;
-    while ((tn = walker.nextNode())) {
-      for (let i = 0; i < tn.nodeValue.length; i++) {
-        nodeMap.push({ node: tn, offset: i });
-      }
+    if (r.width === 0 || r.height === 0) return null;
+    let left = Math.max(r.left, 0), top = Math.max(r.top, 0);
+    let right = Math.min(r.right, window.innerWidth), bottom = Math.min(r.bottom, window.innerHeight);
+    for (const a of clipAncestors) {
+      const ar = a.getBoundingClientRect();
+      left = Math.max(left, ar.left); top = Math.max(top, ar.top);
+      right = Math.min(right, ar.right); bottom = Math.min(bottom, ar.bottom);
     }
+    if (right - left < 4 || bottom - top < 4) return null;
+    return { left, top, right, bottom };
+  }
 
-    for (const match of allMatches) {
-      const start = match.offset;
-      const end   = match.offset + match.length;
-      if (start >= nodeMap.length || end > nodeMap.length || end === 0) continue;
+  let rafPending = false;
+  function schedulePosition() {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => { rafPending = false; positionUI(); });
+  }
 
-      try {
-        const range = document.createRange();
-        range.setStart(nodeMap[start].node, nodeMap[start].offset);
-        if (end <= nodeMap.length && nodeMap[end - 1]) {
-          const endNode   = nodeMap[end - 1].node;
-          const endOffset = nodeMap[end - 1].offset + 1;
-          range.setEnd(endNode, Math.min(endOffset, endNode.nodeValue.length));
-        } else continue;
+  function positionUI() {
+    const el = current;
+    if (!el) { hideUI(); return; }
+    if (!el.isConnected) { detach(); return; }
+    const st = getState(el);
+    syncMirror(el);
+    const vr = visibleRect(el);
+    const showDot = !!vr && (st.typed || st.errors.length > 0 || st.hints.length > 0 || st.status === 'api-error');
+    const showAI  = !!vr && !!S.activeProvider(settings.aiSettings);
+    if (!showDot && !showAI) { hideUI(); return; }
+    const u = ensureUI();
 
-        // FIX #6: SVG ondulado mais visível, espesso e com glow
-        const isHint = match.isHint;
-        const color  = isHint ? 'rgba(168,85,247,0.9)' : 'rgba(239,68,68,0.95)';
-        const colorEnc = encodeURIComponent(color);
-        // Linha ondulada mais espessa (altura 4px, stroke 1.8)
-        const svg = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='4'%3E%3Cpath d='M0 3 Q2 0 4 3 Q6 6 8 3' stroke='${colorEnc}' stroke-width='1.8' fill='none'/%3E%3C/svg%3E")`;
+    const scrollbar = el.scrollHeight > el.clientHeight + 2 ? Math.min(20, el.offsetWidth - el.clientWidth) : 0;
+    const x = Math.max(vr.left, vr.right - DOT_SIZE - DOT_GAP - scrollbar);
+    const y = Math.max(vr.top, vr.bottom - DOT_SIZE - DOT_GAP);
 
-        for (const rect of Array.from(range.getClientRects())) {
-          if (rect.width < 2) continue;
-
-          // Wrapper com brilho/glow atrás
-          const wrapper = document.createElement('div');
-          wrapper.style.cssText = `
-            position:absolute;
-            left:${rect.left - elRect.left}px;
-            top:${rect.bottom - elRect.top - 5}px;
-            width:${rect.width}px;
-            height:8px;
-            pointer-events:all;
-            cursor:pointer;
-          `;
-
-          // Glow layer
-          const glow = document.createElement('div');
-          const glowColor = isHint ? 'rgba(168,85,247,0.2)' : 'rgba(239,68,68,0.2)';
-          glow.style.cssText = `
-            position:absolute;
-            inset:-2px;
-            border-radius:2px;
-            background:${glowColor};
-            filter:blur(2px);
-          `;
-
-          // Underline layer
-          const line = document.createElement('div');
-          line.style.cssText = `
-            position:absolute;
-            inset:0;
-            background:${svg} repeat-x;
-            background-position:0 1px;
-          `;
-
-          wrapper.appendChild(glow);
-          wrapper.appendChild(line);
-          wrapper.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const state = fieldMap.get(el);
-            if (state) openCard(state.indicator, el, state.errors, state.hints);
-          });
-          overlay.appendChild(wrapper);
-        }
-      } catch(e) { /* falha silenciosa */ }
+    if (showDot) {
+      if (!u.indicator.classList.contains(st.status)) setStatus(el, st.status);
+      u.indicator.style.left    = x + 'px';
+      u.indicator.style.top     = y + 'px';
+      u.indicator.style.display = 'flex';
+    } else {
+      u.indicator.style.display = 'none';
     }
-  }
-
-  /* ── Estado global ── */
-  const fieldMap         = new WeakMap();
-  const indicatorToField = new WeakMap();
-  let activeCard         = null;
-  let activeIndicator    = null;
-  let activePreviewCard  = null;
-
-  /* ── Constantes de posicionamento ── */
-  const DOT_SIZE      = 24;
-  const MARGIN_EDGE   = 4;
-  const MARGIN_BOTTOM = 4;
-
-  function hasVerticalScrollbar(el) {
-    return el.scrollHeight > el.clientHeight + 2;
-  }
-
-  function placeIndicator(indicator, el) {
-    const r           = el.getBoundingClientRect();
-    const scrollExtra = hasVerticalScrollbar(el) ? 17 : 0;
-    const posX = r.left + (r.width * 0.98) - DOT_SIZE - scrollExtra;
-    const posY = r.top + (r.height * 0.98) - DOT_SIZE;
-    indicator.style.left = Math.max(r.left, posX) + 'px';
-    indicator.style.top  = Math.max(r.top, posY) + 'px';
-  }
-
-  /* ── Criar indicador — FIX #1 + #2 ── */
-  function createIndicator(el) {
-    const indicator = document.createElement('div');
-    indicator.className       = 'corretor-indicator loading';
-    indicator.innerHTML       = ICONS.loading;
-    indicator.style.display   = 'none';
-    indicator.setAttribute('data-theme', SETTINGS.theme !== 'light' ? 'dark' : 'light');
-    document.body.appendChild(indicator);
-
-    let focused = false;
-    // FIX #2: flag para só mostrar o dot após o usuário ter digitado algo
-    let hasUserTyped = false;
-
-    const onScroll = () => reposition();
-    const onResize = () => reposition();
-
-    function reposition() {
-      if (!document.body.contains(el)) { cleanup(); return; }
-      // FIX #1: verifica se o elemento ainda existe no DOM e está visível
-      if (!focused || SETTINGS.silentMode || !isInViewport(el) || !hasUserTyped) {
-        indicator.style.display = 'none';
-        repositionUnderlay(el);
-        return;
-      }
-      indicator.style.display = 'flex';
-      placeIndicator(indicator, el);
-      repositionUnderlay(el);
+    if (showAI) {
+      u.aiBtn.style.left    = Math.max(0, (showDot ? x - DOT_SIZE - DOT_GAP : x)) + 'px';
+      u.aiBtn.style.top     = y + 'px';
+      u.aiBtn.style.display = 'flex';
+    } else {
+      u.aiBtn.style.display = 'none';
     }
-
-    window.addEventListener('scroll', onScroll, { passive: true, capture: true });
-    window.addEventListener('resize', onResize, { passive: true });
-
-    el.addEventListener('focus', () => {
-      focused = true;
-      // FIX #2: só mostra o dot se já tiver texto E o usuário tiver digitado antes
-      if (!SETTINGS.silentMode && isInViewport(el) && hasUserTyped) {
-        placeIndicator(indicator, el);
-        indicator.style.display = 'flex';
-        const st = fieldMap.get(el);
-        if (st && (st.errors.length || st.hints.length)) drawUnderlines(el, st.errors, st.hints);
-      }
-    });
-
-    el.addEventListener('blur', () => {
-      setTimeout(() => {
-        const active = document.activeElement;
-        // FIX #1: valida que o activeElement não é o próprio indicator
-        if (active === indicator || indicator.contains(active) || (activeCard && activeCard.contains(active))) return;
-        focused = false;
-        indicator.style.display = 'none';
-        clearUnderlay(el);
-      }, 150);
-    });
-
-    // FIX #2: marca que o usuário começou a digitar
-    el.addEventListener('input', () => {
-      hasUserTyped = true;
-    }, { once: false });
-
-    // FIX #1: ao clicar no indicator, garante que ele não some prematuramente
-    indicator.addEventListener('mousedown', (e) => {
-      e.preventDefault(); // evita que o campo perca foco antes do click ser processado
-    });
-
-    indicator.addEventListener('click', e => {
-      e.stopPropagation();
-      if (indicator._apiErrorMsg) { showApiErrorToast(indicator._apiErrorMsg); return; }
-      const state = fieldMap.get(el);
-      if (!state) return;
-      openCard(indicator, el, state.errors, state.hints);
-    });
-
-    function cleanup() {
-      window.removeEventListener('scroll', onScroll, { capture: true });
-      window.removeEventListener('resize', onResize);
-      indicator.remove();
-      removeUnderlay(el);
-    }
-    indicator._cleanup = cleanup;
-
-    indicatorToField.set(indicator, el);
-    return indicator;
+    repositionCards();
   }
 
-  function removeIndicator(el) {
-    const state = fieldMap.get(el);
-    if (state?.indicator?._cleanup) state.indicator._cleanup();
-    else if (state?.indicator) state.indicator.remove();
-    if (state?.aiBtn?._cleanup) state.aiBtn._cleanup();
-    else if (state?.aiBtn) state.aiBtn.remove();
-    removeUnderlay(el);
-    fieldMap.delete(el);
+  function onIndicatorClick() {
+    if (!current) return;
+    const st = getState(current);
+    if (st.status === 'api-error' && st.apiError) { errorToast(st.apiError); return; }
+    openErrorsCard(current);
   }
 
-  /* ── Card de erros — FIX #3 (posicionamento) + #4 (tema) + #5 (fecha ao corrigir) + #9 (título) ── */
-  function openCard(indicator, el, errors, hints) {
-    closeCard(null);
-    activeIndicator = indicator;
-    const card = document.createElement('div');
-    card.className = 'corretor-card';
-    card.setAttribute('data-theme', SETTINGS.theme !== 'light' ? 'dark' : 'light');
+  /* ══ Toasts ══ */
+  function toast(msg) {
+    const u = ensureUI();
+    u.toastEl.textContent = msg;
+    u.toastEl.classList.add('show');
+    clearTimeout(u.toastEl._timer);
+    u.toastEl._timer = setTimeout(() => u.toastEl.classList.remove('show'), 2500);
+  }
+  function errorToast(msg) {
+    const u = ensureUI();
+    u.errToast.textContent = '⚠ ' + msg;
+    u.errToast.classList.add('show');
+    clearTimeout(u.errToast._timer);
+    u.errToast._timer = setTimeout(() => u.errToast.classList.remove('show'), 4500);
+  }
 
-    const text = getTextFrom(el);
-    const wc   = wordCount(text);
-    const cc   = charCount(text);
-    const badges = [];
-    if (errors.length) badges.push(`<span class="corretor-badge badge-error">${errors.length} erro${errors.length !== 1 ? 's' : ''}</span>`);
-    if (hints.length)  badges.push(`<span class="corretor-badge badge-hint">${hints.length} dica${hints.length !== 1 ? 's' : ''}</span>`);
+  /* ══ Cards ══ */
+  const cards = { errors: null, preview: null, history: null }; // { node, el, anchor }
 
-    const header = document.createElement('div');
-    header.className = 'corretor-card-header';
-    // FIX #9: Removido "By JRM" do card — agora só no popup/manifest
+  function anyCardOpen() { return !!(cards.errors || cards.preview || cards.history); }
+
+  function closeCard(name) {
+    const c = cards[name];
+    if (c) { c.node.remove(); cards[name] = null; }
+  }
+  function closeAllCards() { closeCard('history'); closeCard('preview'); closeCard('errors'); }
+  function closeTopCard() {
+    if (cards.history) closeCard('history');
+    else if (cards.preview) closeCard('preview');
+    else closeCard('errors');
+    detachIfIdle();
+  }
+  // O campo perdeu o foco enquanto um card estava aberto: ao fechar o último card, solta o campo
+  function detachIfIdle() {
+    setTimeout(() => { if (current && !anyCardOpen() && !isFieldFocused(current)) detach(); }, 0);
+  }
+
+  function newCard(extraClass) {
+    const card = h('div', 'corretor-card' + (extraClass ? ' ' + extraClass : ''));
+    card.setAttribute('data-theme', themeAttr());
+    return card;
+  }
+
+  function cardHeader(titleHtml, badgesHtml, onClose) {
+    const header = h('div', 'corretor-card-header');
     header.innerHTML = `
-      <div class="corretor-card-title"><span class="dot-red"></span> Corretor PT-BR</div>
-      <div style="display:flex;align-items:center;gap:8px">
-        ${badges.join('')}
-        <button class="corretor-card-close" title="Fechar (Esc)">×</button>
-      </div>`;
-    card.appendChild(header);
+      <div class="corretor-card-title">${titleHtml}</div>
+      <div class="corretor-card-actions">${badgesHtml || ''}<button class="corretor-card-close" title="${escapeHtml(T.cClose)}">×</button></div>`;
+    header.querySelector('.corretor-card-close').addEventListener('click', () => { onClose(); detachIfIdle(); });
+    return header;
+  }
 
-    const counter = document.createElement('div');
-    counter.className   = 'corretor-word-count';
-    counter.textContent = `${wc} ${wc === 1 ? 'palavra' : 'palavras'} · ${cc} caracteres`;
-    card.appendChild(counter);
+  // Posiciona o card acima (ou abaixo) do ponto de ancoragem, alinhado à direita
+  function placeCard(card, anchorRect) {
+    card.style.visibility = 'hidden';
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const cw = card.offsetWidth || 340, ch = card.offsetHeight || 400;
+    let left = anchorRect.right - cw;
+    left = Math.min(Math.max(8, left), vw - cw - 8);
+    let top = anchorRect.top - ch - 8;
+    if (top < 8) top = anchorRect.bottom + 8;
+    if (top + ch > vh - 8) top = vh - ch - 8;
+    card.style.left = Math.max(8, left) + 'px';
+    card.style.top  = Math.max(8, top) + 'px';
+    card.style.visibility = '';
+  }
 
-    header.querySelector('.corretor-card-close').addEventListener('click', () => closeCard(el));
+  function anchorRectFor(name) {
+    if (!ui) return null;
+    const btn = name === 'preview' ? ui.aiBtn : ui.indicator;
+    if (btn.style.display !== 'none') return btn.getBoundingClientRect();
+    if (current) {
+      const vr = visibleRect(current);
+      if (vr) return { left: vr.right - 1, right: vr.right, top: vr.bottom - 1, bottom: vr.bottom };
+    }
+    return null;
+  }
 
-    let panelErrors, panelHints;
+  function repositionCards() {
+    for (const name of ['errors', 'preview']) {
+      const c = cards[name];
+      if (!c) continue;
+      const r = anchorRectFor(name);
+      if (r) placeCard(c.node, r);
+    }
+  }
+
+  function openErrorsCard(el, focusMatch) {
+    const st = getState(el);
+    const prevScroll = cards.errors?.node.querySelector('.corretor-errors-list')?.scrollTop || 0;
+    closeCard('errors');
+    closeCard('history');
+    closeCard('preview');
+    const u = ensureUI();
+    const card = newCard();
+    const { errors, hints } = st;
+
+    const badges = [];
+    if (errors.length) badges.push(`<span class="corretor-badge badge-error">${escapeHtml(T.cErrors(errors.length))}</span>`);
+    if (hints.length)  badges.push(`<span class="corretor-badge badge-hint">${escapeHtml(T.cHints(hints.length))}</span>`);
+    card.appendChild(cardHeader(`<span class="dot-red"></span> ${escapeHtml(T.appName)}`, badges.join(''), () => closeCard('errors')));
+
+    const text = getFieldText(el);
+    const wc   = S.wordCount(text);
+    card.appendChild(h('div', 'corretor-word-count', `${T.words(wc)} · ${T.cChars(text.length)}`));
+
+    let panelErrors = null, panelHints = null;
+    const showHintsFirst = focusMatch && !ERROR_TYPES.has(focusMatch.issueType);
     if (errors.length && hints.length) {
-      const tabs  = document.createElement('div');
-      tabs.className = 'corretor-tabs';
-      const tabErr  = document.createElement('button');
-      tabErr.className   = 'corretor-tab active';
-      tabErr.textContent  = `🔴 Erros (${errors.length})`;
-      const tabHint = document.createElement('button');
-      tabHint.className  = 'corretor-tab';
-      tabHint.textContent = `💡 Dicas (${hints.length})`;
-      tabs.appendChild(tabErr); tabs.appendChild(tabHint);
+      const tabs    = h('div', 'corretor-tabs');
+      const tabErr  = h('button', 'corretor-tab' + (showHintsFirst ? '' : ' active'), T.cTabErrors(errors.length));
+      const tabHint = h('button', 'corretor-tab' + (showHintsFirst ? ' active' : ''), T.cTabHints(hints.length));
+      tabs.append(tabErr, tabHint);
       card.appendChild(tabs);
       tabErr.addEventListener('click', () => {
         tabErr.classList.add('active'); tabHint.classList.remove('active');
@@ -572,602 +853,427 @@
         panelHints.style.display = 'flex'; panelErrors.style.display = 'none';
       });
     }
-    if (errors.length) { panelErrors = buildPanel(el, errors, 'error'); card.appendChild(panelErrors); }
-    if (hints.length)  { panelHints  = buildPanel(el, hints,  'hint');  if (errors.length) panelHints.style.display = 'none'; card.appendChild(panelHints); }
-
+    if (errors.length) { panelErrors = buildPanel(el, errors, 'error', focusMatch); card.appendChild(panelErrors); }
+    if (hints.length) {
+      panelHints = buildPanel(el, hints, 'hint', focusMatch);
+      if (errors.length) panelHints.style.display = showHintsFirst ? 'flex' : 'none';
+      if (errors.length && showHintsFirst) panelErrors.style.display = 'none';
+      card.appendChild(panelHints);
+    }
     if (!errors.length && !hints.length) {
-      const empty = document.createElement('div');
-      empty.className = 'corretor-panel';
-      empty.style.padding = '20px';
-      empty.style.textAlign = 'center';
-      empty.style.color = '#94a3b8';
-      empty.innerHTML = `
-        <div style="font-size: 24px; margin-bottom: 10px;">✨</div>
-        <div>Nenhum erro encontrado no texto analisado.</div>
-      `;
+      const empty = h('div', 'corretor-panel corretor-empty');
+      empty.innerHTML = `<div class="corretor-empty-icon">✨</div><div>${escapeHtml(T.cNoErrors)}</div>`;
       card.appendChild(empty);
     }
 
-    document.body.appendChild(card);
-    activeCard = card;
-    // FIX #3: posicionamento mais próximo e previsível do dot
-    positionCard(card, indicator, el);
-    // FIX #4: animação de entrada
-    card.style.transformOrigin = 'bottom right';
-    setTimeout(() => document.addEventListener('click', outsideClickHandler), 50);
+    u.root.appendChild(card);
+    cards.errors = { node: card, el };
+    const r = anchorRectFor('errors');
+    if (r) placeCard(card, r);
+
+    const focused = card.querySelector('.corretor-error-item.focused');
+    if (focused) focused.scrollIntoView({ block: 'nearest' });
+    else { const list = card.querySelector('.corretor-errors-list'); if (list) list.scrollTop = prevScroll; }
   }
 
-  function buildPanel(el, matches, type) {
-    const panel = document.createElement('div');
-    panel.className = 'corretor-panel';
+  function buildPanel(el, matches, type, focusMatch) {
+    const st = getState(el);
+    const panel = h('div', 'corretor-panel');
 
-    if (type === 'error' && matches.filter(m => m.replacements?.length).length > 0) {
-      const fixAllBtn = document.createElement('button');
-      fixAllBtn.className  = 'corretor-fix-all-btn';
-      fixAllBtn.innerHTML  = `<span>⚡</span> Corrigir tudo automaticamente`;
-      let running = false;
-      fixAllBtn.addEventListener('click', async () => {
-        if (running) return;
-        running = true;
-        closeCard(el);
-        await fixAll(el, matches);
-        // FIX #5: card fecha automaticamente e re-analisa
-      });
+    if (type === 'error' && matches.some(m => m.replacements.length)) {
+      const fixAllBtn = h('button', 'corretor-fix-all-btn');
+      fixAllBtn.innerHTML = `<span>⚡</span> ${escapeHtml(T.cFixAll)}`;
+      fixAllBtn.addEventListener('click', () => fixAll(el, matches), { once: true });
       panel.appendChild(fixAllBtn);
     }
 
-    const div = document.createElement('div');
-    div.className = 'corretor-divider';
-    div.innerHTML = `<span>${type === 'error' ? 'Corrigir palavra por palavra' : 'Sugestões de melhoria'}</span>`;
+    const div = h('div', 'corretor-divider');
+    div.appendChild(h('span', null, type === 'error' ? T.cFixEach : T.cSuggestions));
     panel.appendChild(div);
 
-    const list = document.createElement('div');
-    list.className = 'corretor-errors-list';
+    const list = h('div', 'corretor-errors-list');
+    matches.slice(0, MAX_CARD_ITEMS).forEach(match => {
+      const before = st.text.substring(Math.max(0, match.offset - 15), match.offset);
+      const after  = st.text.substring(match.offset + match.length, match.offset + match.length + 15);
 
-    matches.forEach(match => {
-      const text   = getTextFrom(el);
-      const before = text.substring(Math.max(0, match.offset - 15), match.offset);
-      const wrong  = text.substring(match.offset, match.offset + match.length);
-      const after  = text.substring(match.offset + match.length, match.offset + match.length + 15);
+      const item = h('div', `corretor-error-item${type === 'hint' ? ' hint-item' : ''}${match === focusMatch ? ' focused' : ''}`);
+      const phrase = h('div', 'corretor-error-phrase');
+      phrase.innerHTML = `…${escapeHtml(before)}<strong class="${type === 'hint' ? 'highlight-hint' : 'highlight-error'}">${escapeHtml(match.wrong)}</strong>${escapeHtml(after)}…`;
 
-      const item = document.createElement('div');
-      item.className = `corretor-error-item${type === 'hint' ? ' hint-item' : ''}`;
-
-      const hlClass = type === 'hint' ? 'highlight-hint' : 'highlight-error';
-      const phrase  = document.createElement('div');
-      phrase.className = 'corretor-error-phrase';
-      phrase.innerHTML = `…${escapeHtml(before)}<strong class="${hlClass}">${escapeHtml(wrong)}</strong>${escapeHtml(after)}…`;
-
-      const cat = document.createElement('div');
-      cat.className   = 'corretor-category';
-      cat.textContent = match.rule?.category?.name || match.rule?.issueType || '';
-
-      const msg = document.createElement('div');
-      msg.className   = 'corretor-error-message';
-      msg.textContent = match.message;
-
-      const suggs = document.createElement('div');
-      suggs.className = 'corretor-suggestions';
-      const reps  = (match.replacements || []).slice(0, 4);
+      const suggs = h('div', 'corretor-suggestions');
+      const reps  = match.replacements.slice(0, 4);
       if (!reps.length) {
-        const ns = document.createElement('span');
-        ns.style.cssText = 'font-size:11px;color:#475569';
-        ns.textContent   = 'Sem sugestões automáticas';
-        suggs.appendChild(ns);
+        suggs.appendChild(h('span', 'corretor-no-suggestions', T.cNoSuggestions));
       } else {
         reps.forEach(rep => {
-          const btn = document.createElement('button');
-          btn.className   = `corretor-suggestion-btn${type === 'hint' ? ' hint-btn' : ''}`;
-          btn.textContent  = rep.value;
-          btn.addEventListener('click', async () => {
-            const currentText  = getTextFrom(el);
-            const currentWrong = currentText.substring(match.offset, match.offset + match.length);
-            if (currentWrong !== wrong) {
-              showToast('⚠ Texto foi alterado. Re-analisando…');
-              const state = fieldMap.get(el);
-              if (state) { state.lastText = ''; analyzeField(el); }
-              return;
-            }
-            item.style.opacity       = '0.3';
-            item.style.pointerEvents = 'none';
-            await applySingleFix(el, match, rep.value);
-            // FIX #5: fecha o card automaticamente após corrigir
-            closeCard(el);
-            const state = fieldMap.get(el);
-            if (state) {
-              clearTimeout(state.debounceTimer);
-              state.debounceTimer = setTimeout(() => analyzeField(el), 800);
-            }
-          });
+          const btn = h('button', `corretor-suggestion-btn${type === 'hint' ? ' hint-btn' : ''}`, rep);
+          btn.addEventListener('click', () => applySuggestion(el, match, rep), { once: true });
           suggs.appendChild(btn);
         });
       }
 
-      const ignoreRow = document.createElement('div');
-      ignoreRow.style.marginTop = '4px';
-      const ignoreBtn = document.createElement('button');
-      ignoreBtn.className   = 'corretor-ignore-btn';
-      ignoreBtn.textContent = '🚫 Ignorar sempre';
-      ignoreBtn.addEventListener('click', () => {
-        addToIgnored(wrong);
-        item.style.opacity       = '0.3';
-        item.style.pointerEvents = 'none';
-        showToast(`"${wrong}" adicionado ao dicionário!`);
-        const state = fieldMap.get(el);
-        if (state) { state.lastText = ''; setTimeout(() => analyzeField(el), 300); }
-      });
+      const ignoreRow = h('div', 'corretor-ignore-row');
+      const ignoreBtn = h('button', 'corretor-ignore-btn', T.cIgnore);
+      ignoreBtn.addEventListener('click', () => ignoreWord(match.wrong, item), { once: true });
       ignoreRow.appendChild(ignoreBtn);
+      // Regra inteira: só para gramática/estilo (desligar a regra de ortografia desligaria tudo)
+      if (match.ruleId && match.issueType !== 'misspelling') {
+        const ruleBtn = h('button', 'corretor-ignore-btn', T.cIgnoreRule);
+        ruleBtn.title = match.ruleId;
+        ruleBtn.addEventListener('click', () => ignoreRule(match, item), { once: true });
+        ignoreRow.appendChild(ruleBtn);
+      }
 
-      item.appendChild(phrase); item.appendChild(cat);
-      item.appendChild(msg); item.appendChild(suggs); item.appendChild(ignoreRow);
+      item.append(phrase, h('div', 'corretor-category', match.category || match.issueType),
+        h('div', 'corretor-error-message', match.message), suggs, ignoreRow);
       list.appendChild(item);
     });
+    if (matches.length > MAX_CARD_ITEMS) list.appendChild(h('div', 'corretor-more', T.cMoreItems(matches.length - MAX_CARD_ITEMS)));
 
     panel.appendChild(list);
     return panel;
   }
 
-  /* FIX #3: Card posicionado logo acima/abaixo do dot, alinhado a ele */
-  function positionCard(card, indicator, el) {
-    // Força layout para medir o card
-    card.style.visibility = 'hidden';
-    card.style.display    = 'flex';
-
-    const ir  = indicator.getBoundingClientRect();
-    const vw  = window.innerWidth;
-    const vh  = window.innerHeight;
-    const cw  = card.offsetWidth  || 340;
-    const ch  = card.offsetHeight || 400;
-
-    // Alinha o lado direito do card com o lado direito do dot
-    let left = ir.right - cw;
-    if (left < 8) left = 8;
-    if (left + cw > vw - 8) left = vw - cw - 8;
-
-    // Preferencialmente acima do dot
-    let top = ir.top - ch - 8;
-    if (top < 8) {
-      // Se não couber acima, coloca abaixo
-      top = ir.bottom + 8;
-    }
-    if (top + ch > vh - 8) top = vh - ch - 8;
-    if (top < 8) top = 8;
-
-    card.style.left       = left + 'px';
-    card.style.top        = top  + 'px';
-    card.style.visibility = '';
-  }
-
-  function outsideClickHandler(e) {
-    if (activeCard && !activeCard.contains(e.target) && e.target !== activeIndicator) closeCard(null);
-  }
-  function closeCard(returnFocusTo) {
-    if (activeCard) { activeCard.remove(); activeCard = null; }
-    document.removeEventListener('click', outsideClickHandler);
-    if (returnFocusTo) setTimeout(() => returnFocusTo.focus(), 50);
-  }
-
-  document.addEventListener('keydown', e => {
-    if (e.key !== 'Escape') return;
-    if (activePreviewCard) { activePreviewCard.remove(); activePreviewCard = null; }
-    else if (activeCard)   { closeCard(null); }
-  });
-
-  /* ── Correções — FIX #8: preserva formatação ── */
-  async function fixAll(el, errors) {
-    let text = getTextFrom(el);
-    // Ordena do fim para o início para não deslocar offsets
-    [...errors]
-      .sort((a, b) => b.offset - a.offset)
-      .forEach(err => {
-        const rep = err.replacements?.[0]?.value;
-        if (!rep) return;
-        text = text.substring(0, err.offset) + rep + text.substring(err.offset + err.length);
-      });
-    // FIX #8: smartSetText agora preserva \n
-    await smartSetText(el, text);
-    showToast(`✓ ${errors.length} correção${errors.length !== 1 ? 'ões' : ''} aplicada${errors.length !== 1 ? 's' : ''}!`);
-    const state = fieldMap.get(el);
-    if (state) {
-      state.errors   = [];
-      state.lastText = text.trim();
-      applyIndicatorState(state.indicator, getIndicatorState([], state.hints));
-      clearUnderlay(el);
+  /* ══ Correções ══ */
+  function replaceInInput(el, start, len, value) {
+    el.focus({ preventScroll: true });
+    const before = el.value;
+    el.setSelectionRange(start, start + len);
+    let ok = false;
+    try { ok = document.execCommand('insertText', false, value); } catch { /* fallback */ }
+    // execCommand mantém o desfazer (Ctrl+Z) e avisa React/Vue; se não funcionou, troca direto
+    if (!ok || el.value === before) {
+      if (el.value !== before) return;
+      el.setRangeText(value, start, start + len, 'end');
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
     }
   }
 
-  async function applySingleFix(el, match, replacement) {
-    let text = getTextFrom(el);
-    text = text.substring(0, match.offset) + replacement + text.substring(match.offset + match.length);
-    // FIX #8: preserva formatação ao aplicar correção individual
-    await smartSetText(el, text);
-    showToast(`✓ "${replacement}" aplicado!`);
+  // Troca só o trecho do erro (preserva negrito, links, menções e a posição do cursor)
+  function replaceRangeCE(el, range, value) {
+    el.focus({ preventScroll: true });
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    let ok = false;
+    try { ok = document.execCommand('insertText', false, value); } catch { /* fallback */ }
+    if (ok) return true;
+    try {
+      range.deleteContents();
+      range.insertNode(document.createTextNode(value));
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertReplacementText', data: value }));
+      return true;
+    } catch { return false; }
   }
 
-  /* ── Análise ── */
-  async function analyzeField(el) {
-    if (SETTINGS.silentMode) return;
-    const state = fieldMap.get(el);
-    if (!state) return;
-
-    if (state.abortController) state.abortController.abort();
-    state.abortController = new AbortController();
-
-    const text = getTextFrom(el).trim();
-    if (text === state.lastText) return;
-    state.lastText = text;
-
-    if (text.length < MIN_CHARS) {
-      state.errors = []; state.hints = [];
-      // FIX #2: só mostra loading se o usuário já digitou
-      if (state._hasUserTyped) {
-        applyIndicatorState(state.indicator, 'loading');
+  function replaceMatch(el, m, value) {
+    if (el.isContentEditable) {
+      const live = rangeOf.get(m);
+      let range = live && !live.collapsed && live.toString() === m.wrong ? live.cloneRange() : null;
+      if (!range) {
+        const model = buildTextModel(el);
+        const off = S.relocate(model.text, m.wrong, m.offset);
+        if (off < 0) return false;
+        range = rangeFor(model, off, m.length);
       }
-      clearUnderlay(el);
+      return !!range && replaceRangeCE(el, range, value);
+    }
+    const off = S.relocate(el.value, m.wrong, m.offset);
+    if (off < 0) return false;
+    replaceInInput(el, off, m.length, value);
+    return true;
+  }
+
+  async function applySuggestion(el, m, value) {
+    closeCard('errors');
+    if (!replaceMatch(el, m, value)) {
+      toast(T.cTextChanged);
+      forceRecheck(el);
       return;
     }
+    toast(T.cFixApplied(value));
+    forceRecheck(el, 400);
+  }
 
-    applyIndicatorState(state.indicator, 'loading');
-    const result = await checkText(text, state.abortController.signal);
-    if (result === null) return;
+  async function fixAll(el, matches) {
+    closeCard('errors');
+    // Do fim para o início: corrigir um erro não desloca os anteriores
+    const edits = S.nonOverlappingDesc(matches
+      .filter(m => m.replacements.length)
+      .map(m => ({ m, offset: m.offset, length: m.length, value: m.replacements[0] })));
+    let applied = 0;
+    for (const e of edits) {
+      if (replaceMatch(el, e.m, e.value)) applied++;
+      await sleep(16); // editores como Lexical/ProseMirror atualizam o DOM de forma assíncrona
+    }
+    toast(applied ? T.cFixesApplied(applied) : T.cTextChanged);
+    forceRecheck(el, 400);
+  }
 
-    if (!fieldMap.has(el)) return;
-    const { errors, hints, apiError } = result;
-    if (apiError) { applyIndicatorState(state.indicator, 'api-error', apiError); return; }
-
-    state.errors = errors;
-    state.hints  = hints;
-    applyIndicatorState(state.indicator, getIndicatorState(errors, hints));
-
-    if (document.activeElement === el || isWhatsApp()) {
-      drawUnderlines(el, errors, hints);
+  async function ignoreWord(word, item) {
+    item.style.opacity = '0.3';
+    item.style.pointerEvents = 'none';
+    ignored.add(word.toLowerCase());
+    if (current) refilter(current); // efeito imediato, sem esperar o storage
+    try {
+      await S.addWordToDictionary(word);
+      toast(T.cIgnored(word));
+    } catch {
+      errorToast(T.cDictFull);
     }
   }
 
-  /* ── Botão de IA ── */
-  function createAIButton(el) {
-    const btn = document.createElement('div');
-    btn.className         = 'corretor-ai-btn';
-    btn.title             = 'Melhorar texto com IA (Ctrl+Shift+Space)';
-    btn.innerHTML         = ICON_STAR;
-    btn.style.display     = 'none';
-    btn.style.pointerEvents = 'none';
-    btn.setAttribute('data-theme', SETTINGS.theme !== 'light' ? 'dark' : 'light');
-    document.body.appendChild(btn);
-
-    let focused = false;
-    const onScroll = () => reposition();
-    const onResize = () => reposition();
-
-    function reposition() {
-      if (!focused || !isInViewport(el) || !getActiveAI() || SETTINGS.silentMode) {
-        btn.style.display = 'none'; return;
-      }
-      const r = el.getBoundingClientRect();
-      const scrollExtra = hasVerticalScrollbar(el) ? 17 : 0;
-      btn.style.left          = Math.max(0, r.right - DOT_SIZE - MARGIN_EDGE - scrollExtra - DOT_SIZE - 4) + 'px';
-      btn.style.top           = Math.max(0, r.bottom - DOT_SIZE - MARGIN_BOTTOM) + 'px';
-      btn.style.display       = 'flex';
-      btn.style.pointerEvents = 'all';
+  async function ignoreRule(match, item) {
+    item.style.opacity = '0.3';
+    item.style.pointerEvents = 'none';
+    ignoredRuleIds.add(match.ruleId);
+    if (current) refilter(current);
+    const name = match.message || match.category || match.ruleId;
+    try {
+      const { ignoredRules = [] } = await chrome.storage.sync.get({ ignoredRules: [] });
+      await chrome.storage.sync.set({ ignoredRules: S.addIgnoredRule(ignoredRules, { id: match.ruleId, name }) });
+      toast(T.cRuleIgnored);
+    } catch {
+      errorToast(T.cDictFull);
     }
+  }
 
-    el.addEventListener('focus', () => { focused = true; reposition(); });
-    el.addEventListener('blur', () => {
-      setTimeout(() => {
-        if (document.activeElement === btn || (activePreviewCard && activePreviewCard.contains(document.activeElement))) return;
-        focused = false; btn.style.display = 'none';
-      }, 150);
-    });
-    window.addEventListener('scroll', onScroll, { passive: true, capture: true });
-    window.addEventListener('resize', onResize, { passive: true });
+  // Substitui o texto inteiro (IA)
+  async function replaceAll(el, value) {
+    el.focus({ preventScroll: true });
+    if (!el.isContentEditable) { replaceInInput(el, 0, el.value.length, value); return; }
 
-    btn.addEventListener('mousedown', (e) => e.preventDefault());
-
-    btn.addEventListener('click', async e => {
-      e.stopPropagation();
-      const active = getActiveAI();
-      if (!active) { showToast('⚠ Configure uma IA no popup da extensão'); return; }
-      const text = getTextFrom(el).trim();
-      if (!text || text.length < 5) { showToast('⚠ Escreva algo primeiro'); return; }
-      btn.classList.add('loading'); btn.innerHTML = ICON_SPIN;
-      try {
-        const result = await callAI(active.ai, active.key, text);
-        if (result) openAIPreviewCard(btn, el, result, text, active.ai);
-      } catch(err) { showToast(`⚠ ${err.message}`); }
-      finally      { btn.classList.remove('loading'); btn.innerHTML = ICON_STAR; }
-    });
-
-    btn._cleanup = () => {
-      window.removeEventListener('scroll', onScroll, { capture: true });
-      window.removeEventListener('resize', onResize);
-      btn.remove();
+    const selectAll = () => {
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
     };
+    const before = getFieldText(el);
 
-    return btn;
+    // 1) Colar: editores ricos (Lexical/WhatsApp, Draft, Slate, ProseMirror) tratam o paste mantendo as quebras de linha
+    selectAll();
+    try {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', value);
+      const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true, composed: true });
+      el.dispatchEvent(ev);
+      if (ev.defaultPrevented) {
+        await sleep(60);
+        if (!sameText(getFieldText(el), before)) return;
+      }
+    } catch { /* segue */ }
+
+    // 2) insertText (campos contenteditable simples)
+    selectAll();
+    let ok = false;
+    try { ok = document.execCommand('insertText', false, value); } catch { /* segue */ }
+    if (ok) return;
+
+    // 3) Último recurso
+    el.innerText = value;
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertReplacementText' }));
   }
 
-  /* ── Card preview IA ── */
-  function openAIPreviewCard(anchorBtn, el, result, originalText, aiName) {
-    if (activePreviewCard) { activePreviewCard.remove(); activePreviewCard = null; }
+  /* ══ IA ══ */
+  async function runAI(el) {
+    if (!S.activeProvider(settings.aiSettings)) { toast(T.cConfigureAI); return; }
+    const text = getFieldText(el);
+    if (text.trim().length < MIN_CHARS) { toast(T.cWriteFirst); return; }
+    if (ui?.aiBtn.classList.contains('loading')) return;
+    setAILoading(true);
+    if (!ui || ui.aiBtn.style.display === 'none') toast(T.cProcessing);
+    const res = await send({ type: 'ai-improve', text, tone: 'default' });
+    setAILoading(false);
+    if (!res.ok) { errorToast(errorText(res.error)); return; }
+    if (current !== el) return;
+    openPreviewCard(el, text, res.text, res.provider);
+  }
 
-    const aiLabel = aiName.charAt(0).toUpperCase() + aiName.slice(1);
-    const card    = document.createElement('div');
-    card.className = 'corretor-card corretor-ai-preview';
-    card.setAttribute('data-theme', SETTINGS.theme !== 'light' ? 'dark' : 'light');
+  function saveAIHistory(original, result, aiName) {
+    chrome.storage.local.get({ aiHistory: [] }, data => {
+      const entry = { original, result, aiName, date: Date.now() };
+      chrome.storage.local.set({ aiHistory: [entry, ...(data.aiHistory || [])].slice(0, 10) });
+    });
+  }
 
-    const header = document.createElement('div');
-    header.className = 'corretor-card-header';
-    header.innerHTML = `
-      <div class="corretor-card-title"><span style="font-size:14px">✨</span> Sugestão da IA</div>
-      <div style="display:flex;align-items:center;gap:8px">
-        <span class="corretor-badge badge-hint">${aiLabel}</span>
-        <button class="corretor-card-close" title="Fechar (Esc)">×</button>
-      </div>`;
-    card.appendChild(header);
+  async function copyText(text) {
+    try { await navigator.clipboard.writeText(text); return; } catch { /* fallback */ }
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+    document.documentElement.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    current?.focus({ preventScroll: true });
+  }
 
-    const toneBar = document.createElement('div');
-    toneBar.className = 'ai-tone-bar';
-    toneBar.innerHTML = `
-      <span class="ai-tone-label">Tom:</span>
-      <button class="ai-tone-btn active" data-tone="default">Padrão</button>
-      <button class="ai-tone-btn" data-tone="formal">Formal</button>
-      <button class="ai-tone-btn" data-tone="direct">Direto</button>
-      <button class="ai-tone-btn" data-tone="short">Resumido</button>`;
+  function openPreviewCard(el, originalText, result, provider) {
+    closeCard('preview');
+    closeCard('history');
+    closeCard('errors');
+    const u = ensureUI();
+    const label = S.AI_PROVIDERS[provider]?.label || provider;
+    const card  = newCard('corretor-ai-preview');
+
+    card.appendChild(cardHeader(`<span class="corretor-ai-spark">✨</span> ${escapeHtml(T.cAiSuggestion)}`,
+      `<span class="corretor-badge badge-hint">${escapeHtml(label)}</span>`, () => closeCard('preview')));
+
+    const toneBar = h('div', 'ai-tone-bar');
+    toneBar.appendChild(h('span', 'ai-tone-label', T.cTone));
+    const tones = [['default', T.cToneDefault], ['formal', T.cToneFormal], ['direct', T.cToneDirect], ['short', T.cToneShort]];
+    for (const [tone, name] of tones) {
+      const b = h('button', 'ai-tone-btn' + (tone === 'default' ? ' active' : ''), name);
+      b.dataset.tone = tone;
+      toneBar.appendChild(b);
+    }
     card.appendChild(toneBar);
 
-    const body    = document.createElement('div');
-    body.className = 'ai-preview-body';
-    const label   = document.createElement('div');
-    label.className = 'ai-preview-label'; label.textContent = 'Como ficaria:';
-    const textEl  = document.createElement('div');
-    textEl.className = 'ai-preview-text'; textEl.textContent = result;
-    const wc      = wordCount(result);
-    const wcEl    = document.createElement('div');
-    wcEl.className = 'ai-preview-wordcount';
-    wcEl.textContent = `${wc} ${wc === 1 ? 'palavra' : 'palavras'} · ${charCount(result)} caracteres`;
+    const body    = h('div', 'ai-preview-body');
+    const labelRow = h('div', 'ai-preview-label-row');
+    const labelEl  = h('div', 'ai-preview-label', T.cPreview);
+    const viewBar  = h('div', 'ai-view-bar');
+    const viewDiff = h('button', 'ai-view-btn active', T.cShowChanges);
+    const viewFull = h('button', 'ai-view-btn', T.cShowFinal);
+    viewBar.append(viewDiff, viewFull);
+    labelRow.append(labelEl, viewBar);
+    const textEl  = h('div', 'ai-preview-text');
+    const wcEl    = h('div', 'ai-preview-wordcount');
+    let showDiff  = true;
+    let shownText = result;
 
-    const actions   = document.createElement('div');
-    actions.className = 'ai-preview-actions';
-    const applyBtn  = document.createElement('button'); applyBtn.className = 'ai-preview-apply';  applyBtn.textContent = '✓ Substituir texto';
-    const copyBtn   = document.createElement('button'); copyBtn.className  = 'ai-preview-copy';   copyBtn.textContent  = '⎘ Copiar';
-    const histBtn   = document.createElement('button'); histBtn.className  = 'ai-preview-hist';   histBtn.title        = 'Ver histórico'; histBtn.textContent = '🕐';
-    const cancelBtn = document.createElement('button'); cancelBtn.className = 'ai-preview-cancel'; cancelBtn.textContent = '✕';
+    // Mostra o que a IA mudou: riscado o que saiu, em verde o que entrou
+    const renderPreview = () => {
+      const parts = showDiff ? S.wordDiff(originalText, shownText) : null;
+      viewDiff.classList.toggle('active', showDiff);
+      viewFull.classList.toggle('active', !showDiff);
+      textEl.textContent = '';
+      if (!parts) { textEl.textContent = shownText; return; }
+      for (const p of parts) {
+        if (p.type === 'same') textEl.appendChild(document.createTextNode(p.text));
+        else textEl.appendChild(h(p.type === 'add' ? 'ins' : 'del', p.type === 'add' ? 'diff-add' : 'diff-del', p.text));
+      }
+    };
+    const setResult = r => {
+      shownText = r;
+      wcEl.textContent = `${T.words(S.wordCount(r))} · ${T.cChars(r.length)}`;
+      renderPreview();
+    };
+    viewDiff.addEventListener('click', () => { showDiff = true; renderPreview(); });
+    viewFull.addEventListener('click', () => { showDiff = false; renderPreview(); });
+    setResult(result);
 
+    const actions   = h('div', 'ai-preview-actions');
+    const applyBtn  = h('button', 'ai-preview-apply', T.cReplace);
+    const copyBtn   = h('button', 'ai-preview-copy', T.cCopy);
+    const histBtn   = h('button', 'ai-preview-hist', '🕐');
+    const cancelBtn = h('button', 'ai-preview-cancel', '✕');
+    histBtn.title = T.cHistory;
     actions.append(applyBtn, copyBtn, histBtn, cancelBtn);
-    body.append(label, textEl, wcEl, actions);
+    body.append(labelRow, textEl, wcEl, actions);
     card.appendChild(body);
-    document.body.appendChild(card);
-    activePreviewCard = card;
 
-    // FIX #3: posiciona próximo ao botão de IA
-    const br  = anchorBtn.getBoundingClientRect();
-    const vw  = window.innerWidth;
-    const cw  = card.offsetWidth || 340;
-    const ch  = card.offsetHeight || 360;
-    let left  = br.right - cw;
-    if (left < 8) left = 8;
-    if (left + cw > vw - 8) left = vw - cw - 8;
-    let top = br.top - ch - 8;
-    if (top < 8) top = br.bottom + 8;
-    card.style.left = left + 'px'; card.style.top = top + 'px';
+    u.root.appendChild(card);
+    cards.preview = { node: card, el };
+    const r = anchorRectFor('preview');
+    if (r) placeCard(card, r);
 
-    const closePreview = () => { card.remove(); activePreviewCard = null; };
-    header.querySelector('.corretor-card-close').addEventListener('click', closePreview);
-    cancelBtn.addEventListener('click', closePreview);
-
+    const results = { default: result };
     let currentResult = result;
+    let currentTone   = 'default';
+    let requestId     = 0;
+
     toneBar.addEventListener('click', async e => {
-      const toneBtn = e.target.closest('.ai-tone-btn');
-      if (!toneBtn) return;
-      toneBar.querySelectorAll('.ai-tone-btn').forEach(b => b.classList.remove('active'));
-      toneBtn.classList.add('active');
-      const tone = toneBtn.dataset.tone;
-      if (tone === 'default' && toneBtn.classList.contains('active')) return;
-      textEl.style.opacity = '0.4'; label.textContent = 'Regenerando...';
-      const active = getActiveAI(); if (!active) return;
-      try {
-        const newResult  = await callAI(active.ai, active.key, originalText, tone);
-        currentResult    = newResult; textEl.textContent = newResult;
-        const nwc        = wordCount(newResult);
-        wcEl.textContent = `${nwc} ${nwc === 1 ? 'palavra' : 'palavras'} · ${charCount(newResult)} caracteres`;
-      } catch(e) { showToast(`⚠ ${e.message}`); }
-      finally { textEl.style.opacity = '1'; label.textContent = 'Como ficaria:'; }
+      const btn = e.target.closest('.ai-tone-btn');
+      if (!btn || btn.dataset.tone === currentTone) return;
+      const tone = btn.dataset.tone;
+      currentTone = tone;
+      toneBar.querySelectorAll('.ai-tone-btn').forEach(b => b.classList.toggle('active', b === btn));
+      if (results[tone]) { currentResult = results[tone]; setResult(currentResult); return; }
+
+      const id = ++requestId; // descarta respostas de cliques anteriores
+      textEl.style.opacity = '0.4';
+      labelEl.textContent  = T.cRegenerating;
+      applyBtn.disabled    = true;
+      const res = await send({ type: 'ai-improve', text: originalText, tone });
+      if (id !== requestId || cards.preview?.node !== card) return;
+      textEl.style.opacity = '1';
+      labelEl.textContent  = T.cPreview;
+      applyBtn.disabled    = false;
+      if (!res.ok) { errorToast(errorText(res.error)); return; }
+      results[tone] = res.text;
+      if (currentTone === tone) { currentResult = res.text; setResult(currentResult); }
     });
 
     applyBtn.addEventListener('click', async () => {
-      closePreview();
-      await smartSetText(el, currentResult);
-      saveAIHistory(originalText, currentResult, aiName);
-      showToast(`✓ Texto substituído!`);
-      const state = fieldMap.get(el);
-      if (state) { state.lastText = ''; setTimeout(() => analyzeField(el), 500); }
-      el.focus();
+      closeCard('preview');
+      await replaceAll(el, currentResult);
+      saveAIHistory(originalText, currentResult, provider);
+      toast(T.cReplaced);
+      forceRecheck(el, 500);
     });
-
-    copyBtn.addEventListener('click', () => {
-      navigator.clipboard.writeText(currentResult).then(() => showToast('✓ Copiado!')).catch(() => {
-        const ta = document.createElement('textarea');
-        ta.value = currentResult; ta.style.cssText = 'position:fixed;opacity:0';
-        document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
-        showToast('✓ Copiado!');
-      });
-    });
-
+    copyBtn.addEventListener('click', async () => { await copyText(currentResult); toast(T.cCopied); });
     histBtn.addEventListener('click', () => openHistoryCard(card));
-
-    setTimeout(() => {
-      const outsideHandler = e => {
-        if (activePreviewCard && !activePreviewCard.contains(e.target) && e.target !== anchorBtn) {
-          closePreview(); document.removeEventListener('click', outsideHandler);
-        }
-      };
-      document.addEventListener('click', outsideHandler);
-    }, 50);
+    cancelBtn.addEventListener('click', () => closeCard('preview'));
   }
 
-  /* ── Card histórico IA ── */
   function openHistoryCard(anchorCard) {
-    const existing = document.querySelector('.corretor-history-card');
-    if (existing) { existing.remove(); return; }
-
+    if (cards.history) { closeCard('history'); return; }
     chrome.storage.local.get({ aiHistory: [] }, data => {
-      const card = document.createElement('div');
-      card.className = 'corretor-card corretor-history-card';
-      card.setAttribute('data-theme', SETTINGS.theme !== 'light' ? 'dark' : 'light');
+      const u = ensureUI();
+      const history = data.aiHistory || [];
+      const card = newCard('corretor-history-card');
+      card.appendChild(cardHeader(escapeHtml(T.cHistTitle), '', () => closeCard('history')));
 
-      if (!data.aiHistory.length) {
-        card.innerHTML = `
-          <div class="corretor-card-header">
-            <div class="corretor-card-title">🕐 Histórico</div>
-            <button class="corretor-card-close">×</button>
-          </div>
-          <div style="padding:24px 18px;text-align:center;color:#475569;font-size:12px">Nenhuma sugestão ainda.</div>`;
+      if (!history.length) {
+        card.appendChild(h('div', 'hist-empty', T.cHistEmpty));
       } else {
-        const listHtml = data.aiHistory.map((h, i) => {
-          const date = new Date(h.date).toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
-          return `<div class="hist-item" data-index="${i}">
-            <div class="hist-meta">${h.aiName} · ${date}</div>
-            <div class="hist-text">${escapeHtml(h.result.substring(0, 120))}${h.result.length > 120 ? '…' : ''}</div>
-            <button class="hist-copy" data-index="${i}">⎘ Copiar</button>
-          </div>`;
-        }).join('');
-        card.innerHTML = `
-          <div class="corretor-card-header">
-            <div class="corretor-card-title">🕐 Histórico</div>
-            <button class="corretor-card-close">×</button>
-          </div>
-          <div class="hist-list">${listHtml}</div>`;
-        card.querySelectorAll('.hist-copy').forEach(btn => {
-          btn.addEventListener('click', e => {
-            e.stopPropagation();
-            const h = data.aiHistory[btn.dataset.index];
-            navigator.clipboard.writeText(h.result).catch(() => {});
-            showToast('✓ Copiado do histórico!');
-          });
+        const list = h('div', 'hist-list');
+        history.forEach(entry => {
+          const date = new Date(entry.date).toLocaleString(navigator.language, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+          const item = h('div', 'hist-item');
+          const res  = String(entry.result || '');
+          item.append(
+            h('div', 'hist-meta', `${S.AI_PROVIDERS[entry.aiName]?.label || entry.aiName} · ${date}`),
+            h('div', 'hist-text', res.substring(0, 120) + (res.length > 120 ? '…' : '')),
+          );
+          const copy = h('button', 'hist-copy', T.cCopy);
+          copy.addEventListener('click', async () => { await copyText(res); toast(T.cCopiedHist); });
+          item.appendChild(copy);
+          list.appendChild(item);
         });
+        card.appendChild(list);
       }
 
-      document.body.appendChild(card);
+      u.root.appendChild(card);
+      cards.history = { node: card };
       const ar = anchorCard.getBoundingClientRect();
-      card.style.left = (ar.left - 350) + 'px'; card.style.top = ar.top + 'px';
-      if (parseFloat(card.style.left) < 8) { card.style.left = '8px'; card.style.top = (ar.bottom + 8) + 'px'; }
-      card.querySelector('.corretor-card-close').addEventListener('click', () => card.remove());
-      setTimeout(() => {
-        const h = e => { if (!card.contains(e.target)) { card.remove(); document.removeEventListener('click', h); } };
-        document.addEventListener('click', h);
-      }, 50);
+      let left = ar.left - card.offsetWidth - 8;
+      let top  = ar.top;
+      if (left < 8) { left = Math.min(ar.left, window.innerWidth - card.offsetWidth - 8); top = ar.bottom + 8; }
+      if (top + card.offsetHeight > window.innerHeight - 8) top = Math.max(8, window.innerHeight - card.offsetHeight - 8);
+      card.style.left = Math.max(8, left) + 'px';
+      card.style.top  = Math.max(8, top) + 'px';
     });
   }
 
-  /* ── Registro de campos — FIX #2 ── */
-  function registerField(el) {
-    if (fieldMap.has(el)) return;
-    if (!isVisible(el)) return;
-    if (shouldSkipField(el)) return;
-
-    const indicator = createIndicator(el);
-    const aiBtn     = createAIButton(el);
-    const state     = { indicator, aiBtn, errors: [], hints: [], lastText: '', debounceTimer: null, abortController: null, _hasUserTyped: false };
-    fieldMap.set(el, state);
-
-    let debounceTimer = null;
-    const debouncedAnalyze = () => {
-      clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => analyzeField(el), DEBOUNCE_MS);
-      state.debounceTimer = debounceTimer;
-    };
-
-    el.addEventListener('input', () => {
-      // FIX #2: marca que o usuário digitou e mostra o dot
-      state._hasUserTyped = true;
-      indicator._hasUserTyped = true;
-      // Garante que o dot aparece após o usuário começar a digitar
-      if (!SETTINGS.silentMode && isInViewport(el) && document.activeElement === el) {
-        indicator.style.display = 'flex';
-        placeIndicator(indicator, el);
+  /* ══ Atalho de teclado (chrome.commands, via service worker) ══ */
+  chrome.runtime.onMessage.addListener(msg => {
+    if (msg?.type !== 'command-ai-improve' || !document.hasFocus()) return;
+    const active = document.activeElement;
+    if (active && (active.tagName === 'IFRAME' || active.tagName === 'FRAME')) return; // o frame interno responde
+    (async () => {
+      await ready;
+      if (!isEnabled()) return;
+      if (!current) {
+        const f = resolveField(deepActiveElement());
+        if (f && isEligible(f)) attach(f);
       }
-      clearUnderlay(el);
-      debouncedAnalyze();
-    });
-    el.addEventListener('paste', () => {
-      // Marca que houve interação (paste = usuário colou) e dispara análise
-      state._hasUserTyped = true;
-      indicator._hasUserTyped = true;
-      setTimeout(() => {
-        if (!SETTINGS.silentMode && isInViewport(el)) {
-          indicator.style.display = 'flex';
-          placeIndicator(indicator, el);
-        }
-        debouncedAnalyze();
-      }, 150);
-    });
-
-    el.addEventListener('focus', () => {
-      const text = getTextFrom(el).trim();
-      if (text.length >= MIN_CHARS && text !== state.lastText) debouncedAnalyze();
-    });
-  }
-
-  /* ── Descoberta de campos ── */
-  const FIELD_SELECTOR = 'input[type="text"], input:not([type]), textarea, [contenteditable="true"], [contenteditable=""]';
-
-  function scanNodes(nodes) {
-    if (SETTINGS.silentMode) return;
-    for (const node of nodes) {
-      if (node.nodeType !== 1) continue;
-      if (node.matches?.(FIELD_SELECTOR) && !node.readOnly && !node.disabled) {
-        if (!node.closest?.('.corretor-card') && !node.classList?.contains('corretor-indicator')) registerField(node);
-      }
-      node.querySelectorAll?.(FIELD_SELECTOR).forEach(el => {
-        if (el.readOnly || el.disabled) return;
-        if (el.closest?.('.corretor-card') || el.classList?.contains('corretor-indicator')) return;
-        registerField(el);
-      });
-    }
-  }
-
-  scanNodes([document.body]);
-  new MutationObserver(mutations => {
-    const added = mutations.flatMap(m => [...m.addedNodes]);
-    if (added.length) scanNodes(added);
-  }).observe(document.body, { childList: true, subtree: true });
-
-  /* ── Atalho Ctrl+Shift+Space ── */
-  document.addEventListener('keydown', async e => {
-    if (!e.ctrlKey || !e.shiftKey || e.code !== 'Space') return;
-    e.preventDefault();
-    const active = getActiveAI();
-    if (!active) { showToast('⚠ Configure uma IA no popup da extensão'); return; }
-    const focused = document.activeElement;
-    if (!focused || (!focused.isContentEditable && focused.tagName !== 'INPUT' && focused.tagName !== 'TEXTAREA')) {
-      showToast('⚠ Clique em um campo de texto primeiro'); return;
-    }
-    const text = getTextFrom(focused).trim();
-    if (!text || text.length < 5) { showToast('⚠ Escreva algo primeiro'); return; }
-    showToast('✨ Processando...');
-    try {
-      const result = await callAI(active.ai, active.key, text);
-      if (result) {
-        const st  = fieldMap.get(focused);
-        openAIPreviewCard(st?.aiBtn || focused, focused, result, text, active.ai);
-      }
-    } catch(err) { showToast(`⚠ ${err.message}`); }
+      if (!current) { toast(T.cClickField); return; }
+      runAI(current);
+    })();
   });
-
-  /* ── Toasts ── */
-  function showToast(msg) {
-    let t = document.querySelector('.corretor-toast');
-    if (!t) { t = document.createElement('div'); t.className = 'corretor-toast'; document.body.appendChild(t); }
-    t.textContent = msg; t.classList.add('show');
-    clearTimeout(t._timer);
-    t._timer = setTimeout(() => t.classList.remove('show'), 2500);
-  }
-  function showApiErrorToast(msg) {
-    let t = document.querySelector('.corretor-api-error-toast');
-    if (!t) { t = document.createElement('div'); t.className = 'corretor-api-error-toast'; document.body.appendChild(t); }
-    t.textContent = '⚠ ' + msg; t.classList.add('show');
-    clearTimeout(t._timer);
-    t._timer = setTimeout(() => t.classList.remove('show'), 4000);
-  }
-
 })();

@@ -1,0 +1,17 @@
+/* highlight.css — sublinhado dos erros direto no texto (CSS Custom Highlight API).
+   Injetado no documento da página; só define os pseudo-elementos ::highlight da extensão.
+   Manter igual a HIGHLIGHT_CSS em content.js (usado em campos dentro de Shadow DOM). */
+
+::highlight(corretor-error) {
+  text-decoration: underline wavy rgba(239,68,68,0.95);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+  background-color: rgba(239,68,68,0.10);
+}
+
+::highlight(corretor-hint) {
+  text-decoration: underline wavy rgba(168,85,247,0.95);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+  background-color: rgba(168,85,247,0.08);
+}

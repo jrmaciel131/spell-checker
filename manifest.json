@@ -1,35 +1,64 @@
 {
   "manifest_version": 3,
   "name": "Corretor Ortográfico PT-BR - by jrmaciel13",
-  "version": "12.0.0",
-  "description": "Corretor ortogr\u00e1fico e de estilo para portugu\u00eas brasileiro em qualquer campo de texto",
+  "version": "13.0.0",
+  "description": "Corretor ortográfico e de estilo para português brasileiro em qualquer campo de texto",
+  "minimum_chrome_version": "105",
   "permissions": [
-    "activeTab",
-    "storage"
+    "storage",
+    "activeTab"
   ],
   "host_permissions": [
     "https://api.languagetool.org/*",
     "https://generativelanguage.googleapis.com/*",
+    "https://api.groq.com/*",
     "https://api.deepseek.com/*",
     "https://api.openai.com/*",
-    "https://api.anthropic.com/*",
-    "https://*/*",
-    "http://*/*"
+    "https://api.anthropic.com/*"
   ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": [
         "<all_urls>"
       ],
       "js": [
+        "i18n.js",
+        "shared.js",
         "content.js"
       ],
       "css": [
-        "content.css"
+        "highlight.css"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_origin_as_fallback": true
     }
   ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "ui.css"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "commands": {
+    "ai-improve": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Space"
+      },
+      "description": "Melhorar o texto do campo com IA"
+    }
+  },
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

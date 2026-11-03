@@ -1,16 +1,9 @@
-/* ===== VARIÁVEIS DE TEMA ===== */
-:root {
-  --c-bg:           #1e1e2e;
-  --c-bg-deep:      #13131f;
-  --c-bg-hover:     #252538;
-  --c-border:       #2d2d45;
-  --c-border-hover: #3d3d5c;
-  --c-text:         #e2e8f0;
-  --c-text-muted:   #94a3b8;
-  --c-text-faint:   #475569;
-  --c-text-title:   #f1f5f9;
-  --c-shadow:       rgba(0,0,0,0.5);
-}
+/* ui.css — estilos da interface do corretor.
+   Carregado dentro de um Shadow DOM: não vaza para o site e o CSS do site não chega aqui.
+   O sublinhado no texto fica em highlight.css (precisa estar no documento da página). */
+
+* { box-sizing: border-box; }
+button { font-family: inherit; }
 
 /* ===== BOLINHA INDICADORA ===== */
 .corretor-indicator {
@@ -125,14 +118,6 @@
 @keyframes corretor-pulse-dark {
   0%,100% { box-shadow: 0 0 0 3px rgba(255,255,255,0.06); }
   50%     { box-shadow: 0 0 0 6px rgba(255,255,255,0.02); }
-}
-
-/* ===== OVERLAY DE SUBLINHADO ===== */
-.corretor-underlay {
-  position: fixed;
-  pointer-events: none;
-  z-index: 2147483640;
-  overflow: hidden;
 }
 
 /* ===== CARD — FIX #4 tema claro/escuro + FIX #4 animação + sombra ===== */
@@ -725,3 +710,75 @@
 .corretor-card[data-theme="dark"] .hist-copy:hover { color: #a5b4fc; border-color: #6366f1; }
 .corretor-card[data-theme="light"] .hist-copy { border-color: rgba(0,0,0,0.1); color: #94a3b8; }
 .corretor-card[data-theme="light"] .hist-copy:hover { color: #4f46e5; border-color: #6366f1; }
+
+/* ===== ELEMENTOS ADICIONADOS NA v13 ===== */
+.corretor-card-actions { display: flex; align-items: center; gap: 8px; }
+.corretor-ai-spark { font-size: 14px; }
+
+.corretor-empty { padding: 20px; text-align: center; color: #94a3b8; }
+.corretor-empty-icon { font-size: 24px; margin-bottom: 10px; }
+
+.corretor-no-suggestions { font-size: 11px; color: #64748b; }
+.corretor-ignore-row { margin-top: 4px; }
+.corretor-more { padding: 8px 14px; font-size: 11px; color: #64748b; text-align: center; }
+
+.corretor-card[data-theme="dark"] .corretor-error-item.focused  { background: rgba(99,102,241,0.10); }
+.corretor-card[data-theme="light"] .corretor-error-item.focused { background: rgba(99,102,241,0.07); }
+
+.ai-preview-apply:disabled { opacity: 0.5; cursor: wait; }
+
+.hist-empty { padding: 24px 18px; text-align: center; color: #64748b; font-size: 12px; }
+
+/* ===== SUBLINHADO EM TEXTAREA/INPUT (camada espelho) ===== */
+.corretor-mirror-clip {
+  position: fixed;
+  display: none;
+  overflow: hidden;
+  pointer-events: none;
+}
+.corretor-mirror {
+  position: absolute;
+  box-sizing: border-box;
+  margin: 0;
+  border: 0;
+  overflow: hidden;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  pointer-events: none;
+}
+.corretor-mark-error,
+.corretor-mark-hint {
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+  border-radius: 2px;
+}
+.corretor-mark-error { text-decoration-color: rgba(239,68,68,0.95); background: rgba(239,68,68,0.10); }
+.corretor-mark-hint  { text-decoration-color: rgba(168,85,247,0.95); background: rgba(168,85,247,0.08); }
+
+/* ===== DIFERENÇAS NA PRÉVIA DA IA ===== */
+.ai-preview-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ai-view-bar { display: flex; gap: 4px; }
+.ai-view-btn {
+  border-radius: 20px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  cursor: pointer;
+  border: 1px solid;
+  transition: all 0.15s;
+}
+.corretor-card[data-theme="dark"] .ai-view-btn { background: #1e1e2e; border-color: #2d2d45; color: #64748b; }
+.corretor-card[data-theme="dark"] .ai-view-btn.active { background: rgba(99,102,241,0.15); border-color: #6366f1; color: #a5b4fc; }
+.corretor-card[data-theme="light"] .ai-view-btn { background: #f8fafc; border-color: rgba(0,0,0,0.1); color: #94a3b8; }
+.corretor-card[data-theme="light"] .ai-view-btn.active { background: rgba(99,102,241,0.1); border-color: #6366f1; color: #4f46e5; }
+
+.diff-del { text-decoration: line-through; border-radius: 3px; padding: 0 1px; }
+.diff-add { text-decoration: none; border-radius: 3px; padding: 0 1px; }
+.corretor-card[data-theme="dark"] .diff-del  { color: #fca5a5; background: rgba(239,68,68,0.18); }
+.corretor-card[data-theme="dark"] .diff-add  { color: #86efac; background: rgba(34,197,94,0.18); }
+.corretor-card[data-theme="light"] .diff-del { color: #b91c1c; background: rgba(239,68,68,0.12); }
+.corretor-card[data-theme="light"] .diff-add { color: #15803d; background: rgba(34,197,94,0.14); }
+
+.corretor-ignore-row { display: flex; flex-wrap: wrap; gap: 5px; }
